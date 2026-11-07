@@ -102,6 +102,12 @@ async def check_subscription(credentials):
     return await asyncio.to_thread(has_subscription, credentials)
 
 
+def fetch_google_credentials(state, code):
+    flow = oauth_flow(state)
+    flow.fetch_token(code=code)
+    return flow.credentials
+
+
 async def save_token(user_id, refresh_token):
     encrypted = cipher.encrypt(refresh_token.encode())
     await tokens.update_one(
@@ -199,7 +205,9 @@ async def timeout_loop():
         cursor = members.find({"verified": False, "joined_at": {"$lte": cutoff}})
         async for row in cursor:
             guild = bot.get_guild(GUILD_ID)
-            member = guild.get_member(int(row["user_id"])) if guild else None
+            if guild is None:
+                continue
+            member = guild.get_member(int(row["user_id"]))
             if member is None:
                 await members.delete_one({"user_id": row["user_id"]})
                 await oauth_states.delete_many({"user_id": row["user_id"]})
@@ -268,9 +276,9 @@ async def oauth_callback(request):
         return web.Response(text="Bot đang kết nối lại Discord. Vui lòng thử lại sau.", status=503)
 
     try:
-        flow = oauth_flow(state)
-        flow.fetch_token(code=request.query["code"])
-        credentials = flow.credentials
+        credentials = await asyncio.to_thread(
+            fetch_google_credentials, state, request.query["code"]
+        )
         if not credentials.refresh_token:
             return web.Response(
                 text="Google không trả refresh token. Hãy thử lại và cấp quyền.",
