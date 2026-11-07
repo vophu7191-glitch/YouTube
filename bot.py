@@ -1,55 +1,56 @@
 import asyncio
 import os
 import secrets
-import sqlite3
 import time
 from contextlib import suppress
-from urllib.parse import urlencode
+from datetime import datetime, timedelta, timezone
 
 import discord
 from aiohttp import web
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from motor.motor_asyncio import AsyncIOMotorClient
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 REDIRECT_URI = os.environ["GOOGLE_REDIRECT_URI"]
-BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 CHANNEL_ID = int(os.environ["VERIFY_CHANNEL_ID"])
 ROLE_ID = int(os.environ["MEMBER_ROLE_ID"])
 YOUTUBE_CHANNEL_ID = os.environ["YOUTUBE_CHANNEL_ID"]
 GUILD_ID = int(os.environ["GUILD_ID"])
+MONGO_URI = os.environ["MONGO_URI"]
+DB_NAME = os.getenv("MONGO_DATABASE", "youtube_verification")
 ENCRYPTION_KEY = os.environ["TOKEN_ENCRYPTION_KEY"].encode()
-DB_PATH = os.getenv("DATABASE_PATH", "data.sqlite3")
+
 VERIFY_SECONDS = 300
 RECHECK_SECONDS = 6 * 60 * 60
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-
 cipher = Fernet(ENCRYPTION_KEY)
-db = sqlite3.connect(DB_PATH)
-db.execute("PRAGMA journal_mode=WAL")
-db.executescript("""
-CREATE TABLE IF NOT EXISTS members (
-  user_id TEXT PRIMARY KEY,
-  joined_at INTEGER NOT NULL,
-  verified INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS oauth_states (
-  state TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tokens (
-  user_id TEXT PRIMARY KEY,
-  refresh_token BLOB NOT NULL,
-  checked_at INTEGER NOT NULL
-);
-""")
-db.commit()
+
+mongo = AsyncIOMotorClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=10000,
+)
+database = mongo[DB_NAME]
+members = database["members"]
+oauth_states = database["oauth_states"]
+tokens = database["tokens"]
+bot_ready = asyncio.Event()
+
+
+async def init_database():
+    await mongo.admin.command("ping")
+    await members.create_index("user_id", unique=True)
+    await members.create_index("joined_at")
+    await oauth_states.create_index("state", unique=True)
+    await oauth_states.create_index("expires_at", expireAfterSeconds=0)
+    await tokens.create_index("user_id", unique=True)
 
 
 def oauth_flow(state=None):
@@ -67,10 +68,15 @@ def oauth_flow(state=None):
     )
 
 
-def make_auth_url(user_id):
+async def make_auth_url(user_id):
     state = secrets.token_urlsafe(32)
-    db.execute("INSERT INTO oauth_states VALUES (?, ?, ?)", (state, str(user_id), int(time.time())))
-    db.commit()
+    now = datetime.now(timezone.utc)
+    await oauth_states.insert_one({
+        "state": state,
+        "user_id": str(user_id),
+        "created_at": now,
+        "expires_at": now + timedelta(seconds=VERIFY_SECONDS),
+    })
     flow = oauth_flow(state)
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -80,12 +86,10 @@ def make_auth_url(user_id):
     return url
 
 
-def youtube_client(credentials):
-    return build("youtube", "v3", credentials=credentials, cache_discovery=False)
-
-
 def has_subscription(credentials):
-    response = youtube_client(credentials).subscriptions().list(
+    response = build(
+        "youtube", "v3", credentials=credentials, cache_discovery=False
+    ).subscriptions().list(
         part="id",
         mine=True,
         forChannelId=YOUTUBE_CHANNEL_ID,
@@ -98,13 +102,16 @@ async def check_subscription(credentials):
     return await asyncio.to_thread(has_subscription, credentials)
 
 
-def save_token(user_id, refresh_token):
+async def save_token(user_id, refresh_token):
     encrypted = cipher.encrypt(refresh_token.encode())
-    db.execute(
-        "INSERT OR REPLACE INTO tokens(user_id, refresh_token, checked_at) VALUES (?, ?, ?)",
-        (str(user_id), encrypted, int(time.time())),
+    await tokens.update_one(
+        {"user_id": str(user_id)},
+        {"$set": {
+            "refresh_token": encrypted,
+            "checked_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
     )
-    db.commit()
 
 
 def load_credentials(encrypted):
@@ -122,20 +129,23 @@ def load_credentials(encrypted):
 intents = discord.Intents.default()
 intents.members = True
 bot = discord.Client(intents=intents)
-tree = discord.app_commands.CommandTree(bot)
 
 
 class VerifyView(discord.ui.View):
     def __init__(self, url):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="Xác thực YouTube", style=discord.ButtonStyle.link, url=url))
+        self.add_item(discord.ui.Button(
+            label="Xác thực YouTube",
+            style=discord.ButtonStyle.link,
+            url=url,
+        ))
 
 
 async def send_verification(member):
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
-        return
-    url = make_auth_url(member.id)
+        channel = await bot.fetch_channel(CHANNEL_ID)
+    url = await make_auth_url(member.id)
     embed = discord.Embed(
         title="Xác thực đăng ký YouTube",
         description=(
@@ -150,124 +160,201 @@ async def send_verification(member):
 
 @bot.event
 async def on_ready():
-    with suppress(Exception):
-        await tree.sync()
-    print(f"Ready: {bot.user}")
+    bot_ready.set()
+    print(f"Discord connected: {bot.user}")
+
+
+@bot.event
+async def on_disconnect():
+    bot_ready.clear()
+    print("Discord connection lost; discord.py will reconnect.")
+
+
+@bot.event
+async def on_resumed():
+    bot_ready.set()
+    print("Discord session resumed.")
 
 
 @bot.event
 async def on_member_join(member):
     if member.guild.id != GUILD_ID or member.bot:
         return
-    db.execute(
-        "INSERT OR REPLACE INTO members(user_id, joined_at, verified) VALUES (?, ?, 0)",
-        (str(member.id), int(time.time())),
+    now = datetime.now(timezone.utc)
+    await members.update_one(
+        {"user_id": str(member.id)},
+        {"$set": {"joined_at": now, "verified": False}},
+        upsert=True,
     )
-    db.commit()
-    await send_verification(member)
+    try:
+        await send_verification(member)
+    except Exception as exc:
+        print(f"Could not send verification: {type(exc).__name__}")
 
 
 async def timeout_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        now = int(time.time())
-        rows = db.execute(
-            "SELECT user_id FROM members WHERE verified=0 AND joined_at <= ?",
-            (now - VERIFY_SECONDS,),
-        ).fetchall()
-        guild = bot.get_guild(GUILD_ID)
-        if guild:
-            for (user_id,) in rows:
-                member = guild.get_member(int(user_id))
-                if member:
-                    with suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
-                        await member.kick(reason="Không hoàn tất xác thực YouTube trong 5 phút")
-                db.execute("DELETE FROM members WHERE user_id=?", (user_id,))
-                db.execute("DELETE FROM oauth_states WHERE user_id=?", (user_id,))
-                db.commit()
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=VERIFY_SECONDS)
+        cursor = members.find({"verified": False, "joined_at": {"$lte": cutoff}})
+        async for row in cursor:
+            guild = bot.get_guild(GUILD_ID)
+            member = guild.get_member(int(row["user_id"])) if guild else None
+            if member is None:
+                await members.delete_one({"user_id": row["user_id"]})
+                await oauth_states.delete_many({"user_id": row["user_id"]})
+                continue
+            try:
+                await member.kick(reason="Không hoàn tất xác thực YouTube trong 5 phút")
+            except discord.NotFound:
+                pass
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+            await members.delete_one({"user_id": row["user_id"]})
+            await oauth_states.delete_many({"user_id": row["user_id"]})
         await asyncio.sleep(15)
 
 
 async def subscription_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        rows = db.execute("SELECT user_id, refresh_token FROM tokens").fetchall()
-        guild = bot.get_guild(GUILD_ID)
-        role = guild.get_role(ROLE_ID) if guild else None
-        for user_id, encrypted in rows:
+        async for row in tokens.find({}):
+            user_id = row["user_id"]
             try:
-                credentials = load_credentials(encrypted)
+                credentials = load_credentials(row["refresh_token"])
                 await asyncio.to_thread(credentials.refresh, Request())
                 subscribed = await check_subscription(credentials)
-                db.execute("UPDATE tokens SET checked_at=? WHERE user_id=?", (int(time.time()), user_id))
-                db.commit()
-                if not subscribed and guild:
-                    member = guild.get_member(int(user_id))
-                    if member:
-                        with suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
-                            await member.kick(reason="Không còn đăng ký kênh YouTube")
-                    db.execute("DELETE FROM tokens WHERE user_id=?", (user_id,))
-                    db.execute("UPDATE members SET verified=0 WHERE user_id=?", (user_id,))
-                    db.commit()
+                await tokens.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"checked_at": datetime.now(timezone.utc)}},
+                )
+                if subscribed:
+                    continue
+
+                guild = bot.get_guild(GUILD_ID)
+                member = guild.get_member(int(user_id)) if guild else None
+                if member:
+                    try:
+                        await member.kick(reason="Không còn đăng ký kênh YouTube")
+                    except discord.NotFound:
+                        pass
+                    except (discord.Forbidden, discord.HTTPException):
+                        continue
+                await tokens.delete_one({"user_id": user_id})
+                await members.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"verified": False}},
+                )
+            except InvalidToken:
+                print(f"Stored token cannot be decrypted for user {user_id}; check TOKEN_ENCRYPTION_KEY.")
             except Exception as exc:
                 print(f"Subscription check failed for user {user_id}: {type(exc).__name__}")
         await asyncio.sleep(RECHECK_SECONDS)
 
 
 async def oauth_callback(request):
-    error = request.query.get("error")
     state = request.query.get("state", "")
-    row = db.execute(
-        "SELECT user_id, created_at FROM oauth_states WHERE state=?", (state,)
-    ).fetchone()
-    if not row or int(time.time()) - row[1] > VERIFY_SECONDS:
+    row = await oauth_states.find_one({"state": state})
+    now = datetime.now(timezone.utc)
+    if not row or row["expires_at"] <= now:
         return web.Response(text="Liên kết xác thực không hợp lệ hoặc đã hết hạn.", status=400)
-    user_id = row[0]
-    db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-    db.commit()
-    if error:
-        return web.Response(text="Bạn đã từ chối hoặc hủy cấp quyền Google. Hãy quay lại Discord.")
+
+    user_id = row["user_id"]
+    if request.query.get("error"):
+        await oauth_states.delete_one({"state": state})
+        return web.Response(text="Bạn đã hủy cấp quyền Google. Hãy quay lại Discord.")
+
+    if not bot_ready.is_set():
+        return web.Response(text="Bot đang kết nối lại Discord. Vui lòng thử lại sau.", status=503)
+
     try:
         flow = oauth_flow(state)
         flow.fetch_token(code=request.query["code"])
         credentials = flow.credentials
         if not credentials.refresh_token:
-            return web.Response(text="Google không trả refresh token. Hãy thử lại và chọn cấp quyền.")
+            return web.Response(
+                text="Google không trả refresh token. Hãy thử lại và cấp quyền.",
+                status=400,
+            )
+
         subscribed = await check_subscription(credentials)
         if not subscribed:
-            return web.Response(text="Chưa tìm thấy đăng ký kênh. Hãy đăng ký kênh rồi xác thực lại trong thời hạn.")
-        save_token(user_id, credentials.refresh_token)
-        db.execute("UPDATE members SET verified=1 WHERE user_id=?", (user_id,))
-        db.commit()
+            return web.Response(
+                text="Chưa tìm thấy đăng ký kênh. Hãy đăng ký kênh rồi mở lại liên kết xác thực trong 5 phút.",
+                status=200,
+            )
+
         guild = bot.get_guild(GUILD_ID)
         member = guild.get_member(int(user_id)) if guild else None
         role = guild.get_role(ROLE_ID) if guild else None
-        if member and role:
-            await member.add_roles(role, reason="Đã xác thực đăng ký YouTube")
+        if member is None or role is None:
+            await oauth_states.delete_one({"state": state})
+            return web.Response(text="Không tìm thấy thành viên hoặc role Discord.", status=404)
+
+        await member.add_roles(role, reason="Đã xác thực đăng ký YouTube")
+        await save_token(user_id, credentials.refresh_token)
+        await members.update_one(
+            {"user_id": user_id},
+            {"$set": {"verified": True, "verified_at": now}},
+            upsert=True,
+        )
+        await oauth_states.delete_one({"state": state})
         return web.Response(
             text="Xác thực thành công! Bạn đã được cấp role thành viên. Có thể quay lại Discord.",
             content_type="text/plain",
         )
+    except KeyError:
+        await oauth_states.delete_one({"state": state})
+        return web.Response(text="Google không trả mã xác thực hợp lệ.", status=400)
     except Exception as exc:
         print(f"OAuth verification failed: {type(exc).__name__}")
-        return web.Response(text="Không thể xác thực lúc này. Hãy thử lại hoặc liên hệ quản trị viên.", status=500)
+        return web.Response(
+            text="Không thể xác thực lúc này. Liên kết vẫn còn hiệu lực; hãy thử lại.",
+            status=500,
+        )
+
+
+async def ping(request):
+    return web.Response(text="pong", status=200)
 
 
 async def health(request):
-    return web.json_response({"status": "ok"})
+    try:
+        await mongo.admin.command("ping")
+    except Exception:
+        return web.json_response({"status": "degraded", "database": "unavailable"}, status=503)
+    return web.json_response({
+        "status": "ok" if bot_ready.is_set() else "degraded",
+        "database": "ok",
+        "discord": "connected" if bot_ready.is_set() else "disconnected",
+    }, status=200 if bot_ready.is_set() else 503)
 
 
 async def main():
+    await init_database()
     app = web.Application()
-    app.router.add_get("/oauth/callback", oauth_callback)
+    app.router.add_get("/ping", ping)
     app.router.add_get("/health", health)
+    app.router.add_get("/oauth/callback", oauth_callback)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
     await site.start()
-    asyncio.create_task(timeout_loop())
-    asyncio.create_task(subscription_loop())
-    await bot.start(BOT_TOKEN)
+
+    timeout_task = asyncio.create_task(timeout_loop())
+    subscription_task = asyncio.create_task(subscription_loop())
+    try:
+        await bot.start(BOT_TOKEN, reconnect=True)
+    finally:
+        timeout_task.cancel()
+        subscription_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await timeout_task
+        with suppress(asyncio.CancelledError):
+            await subscription_task
+        await runner.cleanup()
+        mongo.close()
 
 
 if __name__ == "__main__":
