@@ -617,10 +617,14 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment):
 
 
 @bot.tree.command(name="kenhthongbao", description="Chọn kênh Discord nhận thông báo live và donate (admin)")
-@app_commands.describe(kenh="Kênh văn bản nhận thông báo")
+@app_commands.describe(kenh="Chọn kênh từ danh sách gợi ý. Bỏ trống = dùng kênh bạn đang gõ lệnh")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
-async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel | None = None):
+    kenh = kenh or inter.channel
+    if not isinstance(kenh, discord.TextChannel):
+        await inter.response.send_message("Hãy chọn một kênh văn bản.", ephemeral=True)
+        return
     await inter.response.defer(ephemeral=True)
     await db.settings.update_one({"_id": "announce"}, {"$set": {"channel_id": kenh.id}}, upsert=True)
     await inter.followup.send(f"Đã đặt kênh thông báo: {kenh.mention}")
