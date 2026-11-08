@@ -362,6 +362,21 @@ class Bot(discord.Client):
 bot = Bot()
 
 
+@bot.tree.error
+async def on_app_error(inter: discord.Interaction, error: app_commands.AppCommandError):
+    """Lỗi lệnh sẽ được ghi vào log và báo lại ngay trong Discord (chỉ người gõ lệnh thấy)."""
+    err = getattr(error, "original", error)
+    log.error("Lỗi lệnh /%s", inter.command.name if inter.command else "?", exc_info=err)
+    text = f"⚠️ Lệnh gặp lỗi: {type(err).__name__}: {err}"[:1900]
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(text, ephemeral=True)
+        else:
+            await inter.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 @bot.tree.command(name="link", description="Liên kết kênh YouTube của bạn với tài khoản Discord")
 async def link_cmd(inter: discord.Interaction):
     code = "DC-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
@@ -606,8 +621,9 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment):
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+    await inter.response.defer(ephemeral=True)
     await db.settings.update_one({"_id": "announce"}, {"$set": {"channel_id": kenh.id}}, upsert=True)
-    await inter.response.send_message(f"Đã đặt kênh thông báo: {kenh.mention}", ephemeral=True)
+    await inter.followup.send(f"Đã đặt kênh thông báo: {kenh.mention}")
 
 
 if __name__ == "__main__":
