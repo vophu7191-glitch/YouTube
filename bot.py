@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -60,7 +61,7 @@ async def yt_get(path, **params):
         return data
 
 
-async def find_live_chats() -> dict[str, str]:
+async def find_live_chats() -> dict[str, dict]:
     """Dùng RSS (miễn phí) tìm video mới, rồi videos.list (1 quota) xem video nào đang live."""
     ids = []
     for ch in YT_CHANNELS:
@@ -69,15 +70,62 @@ async def find_live_chats() -> dict[str, str]:
     ids = [i for i in dict.fromkeys(ids) if i not in ended]
     if not ids:
         return {}
-    data = await yt_get("videos", part="liveStreamingDetails", id=",".join(ids))
+    data = await yt_get("videos", part="liveStreamingDetails,snippet", id=",".join(ids))
     out = {}
     for v in data.get("items", []):
         d = v.get("liveStreamingDetails", {})
         if d.get("actualEndTime"):
             ended.add(v["id"])
         if d.get("activeLiveChatId") and d.get("actualStartTime") and not d.get("actualEndTime"):
-            out[v["id"]] = d["activeLiveChatId"]
+            out[v["id"]] = video_info(v, d["activeLiveChatId"])
     return out
+
+
+announced: set[str] = set()  # live đã thông báo, tránh thông báo lặp
+
+
+def video_info(v: dict, chat_id: str) -> dict:
+    sn = v.get("snippet", {})
+    thumbs = sn.get("thumbnails", {})
+    thumb = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+    return {
+        "chat": chat_id,
+        "title": sn.get("title", "Live stream"),
+        "channel": sn.get("channelTitle", "Kênh YouTube"),
+        "channel_id": sn.get("channelId", ""),
+        "thumb": thumb,
+    }
+
+
+async def get_announce_channel():
+    doc = await db.settings.find_one({"_id": "announce"})
+    cid = doc["channel_id"] if doc else ANNOUNCE_ID
+    return bot.get_channel(cid) if cid else None
+
+
+async def announce_live(vid: str, info: dict, source: str):
+    """Thông báo kèm link live và link kênh khi bot bắt đầu theo dõi."""
+    if vid in announced:
+        return
+    announced.add(vid)
+    ch = await get_announce_channel()
+    if not ch:
+        return
+    e = discord.Embed(
+        title=f"🔴 {info['title']}"[:256],
+        url=f"https://www.youtube.com/watch?v={vid}",
+        description=(
+            f"Kênh [{info['channel']}](https://www.youtube.com/channel/{info['channel_id']}) đang live.\n"
+            f"Bot bắt đầu theo dõi donate ({source})."
+        ),
+        color=discord.Color.red(),
+    )
+    if info.get("thumb"):
+        e.set_image(url=info["thumb"])
+    try:
+        await ch.send(embed=e)
+    except discord.HTTPException as ex:
+        log.warning("Không gửi được thông báo live: %s", ex)
 
 
 async def ensure_channel(au: dict):
@@ -157,9 +205,7 @@ async def handle_message(item: dict, video_id: str):
 
 
 async def announce(au: dict, d: dict, vnd: int):
-    if not ANNOUNCE_ID:
-        return
-    ch = bot.get_channel(ANNOUNCE_ID)
+    ch = await get_announce_channel()
     if not ch:
         return
     info = await db.channels.find_one({"_id": au["channelId"]}) or {}
@@ -208,10 +254,11 @@ async def monitor():
     except Exception as e:
         log.warning("Không kiểm tra được live: %s", e)
         return
-    for vid, chat in live.items():
+    for vid, info in live.items():
         t = watchers.get(vid)
         if not t or t.done():
-            watchers[vid] = asyncio.create_task(watch_chat(vid, chat))
+            watchers[vid] = asyncio.create_task(watch_chat(vid, info["chat"]))
+            await announce_live(vid, info, "tự động")
     for vid in [v for v, t in watchers.items() if t.done() and v not in live]:
         watchers.pop(vid)
 
@@ -387,7 +434,7 @@ async def watch_cmd(inter: discord.Interaction, video: str):
         return
     await inter.response.defer(ephemeral=True)
     try:
-        data = await yt_get("videos", part="liveStreamingDetails", id=vid)
+        data = await yt_get("videos", part="liveStreamingDetails,snippet", id=vid)
     except YTError as e:
         await inter.followup.send(f"Lỗi YouTube: {e}")
         return
@@ -396,10 +443,12 @@ async def watch_cmd(inter: discord.Interaction, video: str):
     if not chat:
         await inter.followup.send("Video này không có live chat đang hoạt động.")
         return
+    info = video_info(items[0], chat)
     t = watchers.get(vid)
     if not t or t.done():
         watchers[vid] = asyncio.create_task(watch_chat(vid, chat))
-    await inter.followup.send(f"Đang theo dõi live `{vid}`.")
+        await announce_live(vid, info, f"thủ công, bởi {inter.user.display_name}")
+    await inter.followup.send(f"Đang theo dõi live **{info['title']}** (`{vid}`).")
 
 
 @bot.tree.command(name="themdonate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
@@ -464,15 +513,45 @@ async def themdonate_cmd(
     )
 
 
-@bot.tree.command(name="xoadonate", description="Xoá một khoản donate đã thêm tay (admin)")
-@app_commands.describe(ma="Mã manual-xxxxxxxx (1 khoản) hoặc batch-xxxxxx (cả lô nhập CSV)")
+@bot.tree.command(name="xoadonate", description="Xoá một khoản donate hoặc cả lô nhập CSV (admin)")
+@app_commands.describe(ma="Chọn khoản trong danh sách gợi ý, hoặc nhập batch-xxxxxx để xoá cả lô CSV")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def xoadonate_cmd(inter: discord.Interaction, ma: str):
     ma = ma.strip()
-    r = await db.donations.delete_many({"manual": True, "$or": [{"_id": ma}, {"batch": ma}]})
-    msg = f"Đã xoá {r.deleted_count} khoản." if r.deleted_count else "Không tìm thấy khoản thêm tay với mã này."
+    if ma.startswith("h:"):  # ID dài từ YouTube được rút gọn thành mã băm
+        rows = await db.donations.find({}, {"_id": 1}).sort("at", -1).limit(500).to_list(500)
+        flt = {"_id": {"$in": [r["_id"] for r in rows if donation_key(r["_id"]) == ma]}}
+    else:
+        flt = {"$or": [{"_id": ma}, {"batch": ma}]}
+    r = await db.donations.delete_many(flt)
+    msg = f"Đã xoá {r.deleted_count} khoản." if r.deleted_count else "Không tìm thấy khoản donate với mã này."
     await inter.response.send_message(msg, ephemeral=True)
+
+
+def donation_key(did: str) -> str:
+    """Giá trị gợi ý (tối đa 100 ký tự). ID quá dài được rút gọn bằng mã băm."""
+    return did if len(did) <= 100 else "h:" + hashlib.md5(did.encode()).hexdigest()[:12]
+
+
+@xoadonate_cmd.autocomplete("ma")
+async def xoadonate_autocomplete(inter: discord.Interaction, current: str):
+    rows = await db.donations.find().sort("at", -1).limit(25).to_list(25)
+    vn = timezone(timedelta(hours=7))
+    out = []
+    for r in rows:
+        cid = r["channel_id"]
+        if cid.startswith("dc:"):
+            who = f"Discord {cid[3:]}"
+        else:
+            info = await db.channels.find_one({"_id": cid}) or {}
+            who = info.get("handle") or info.get("name") or cid
+        tag = "thêm tay" if r.get("manual") else "live"
+        name = f"{r['amount']:,.0f} {r['currency']} • {who} • {tag} • {r['at'].astimezone(vn):%d/%m %H:%M}"
+        if current and current.lower() not in name.lower():
+            continue
+        out.append(app_commands.Choice(name=name[:100], value=donation_key(r["_id"])))
+    return out[:25]
 
 
 @bot.tree.command(name="nhapdonate", description="Nhập hàng loạt donate cũ từ file CSV (admin)")
@@ -520,6 +599,15 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment):
         if len(errors) > 10:
             msg += f"\n... và {len(errors) - 10} lỗi khác."
     await inter.followup.send(msg[:1990])
+
+
+@bot.tree.command(name="kenhthongbao", description="Chọn kênh Discord nhận thông báo live và donate (admin)")
+@app_commands.describe(kenh="Kênh văn bản nhận thông báo")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+    await db.settings.update_one({"_id": "announce"}, {"$set": {"channel_id": kenh.id}}, upsert=True)
+    await inter.response.send_message(f"Đã đặt kênh thông báo: {kenh.mention}", ephemeral=True)
 
 
 if __name__ == "__main__":
