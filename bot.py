@@ -166,6 +166,22 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
     return err
 
 
+async def announce_live_end(vid: str, info: dict, gids: set[int]):
+    e = discord.Embed(
+        title=f"⚫ Livestream đã kết thúc: {info.get('title', vid)}"[:256],
+        url=f"https://www.youtube.com/watch?v={vid}",
+        description=f"Livestream của **{info.get('channel', 'YouTube')}** đã kết thúc. Bot dừng theo dõi live này.",
+        color=discord.Color.dark_grey(),
+    )
+    for gid in gids:
+        if (vid, gid) not in announced:
+            continue
+        err = await send_notice(gid, e)
+        if err:
+            log.warning("Không gửi được thông báo kết thúc live (server %s): %s", gid, err)
+        announced.discard((vid, gid))
+
+
 async def ensure_channel(au: dict):
     """Lưu tên, avatar, @handle của người dùng YouTube."""
     cid = au["channelId"]
@@ -245,6 +261,35 @@ async def handle_message(item: dict, video_id: str, info: dict):
             await try_link(m.group(0), au, gids)
         return
 
+    if kind == "giftEvent":
+        d = sn.get("giftDetails") or {}
+        jewels = max(0, int(d.get("jewelsAmount") or 0)) * max(1, int(d.get("comboCount") or 1))
+        if not jewels:
+            return
+        ruby = jewels // 2
+        ruby_vnd = int(ruby * RATES_VND["USD"] / 100)
+        recorded = []
+        for gid in gids:
+            did = f"{gid}:{item['id']}"
+            result = await db.donations.update_one(
+                {"_id": did},
+                {"$set": {
+                    "guild_id": gid, "channel_id": au["channelId"], "video_id": video_id,
+                    "stream_channel": info.get("channel_id") or None, "kind": "gift",
+                    "gift_name": d.get("giftName") or "YouTube Gift", "jewels": jewels,
+                    "ruby": ruby, "ruby_vnd": ruby_vnd, "vnd": 0, "creator_vnd": 0,
+                    "at": datetime.now(timezone.utc),
+                }},
+                upsert=True,
+            )
+            if result.upserted_id:
+                recorded.append(gid)
+        if recorded:
+            await ensure_channel(au)
+            for gid in recorded:
+                await announce_gift(gid, au, d, jewels, ruby, ruby_vnd, info)
+        return
+
     if kind not in ("superChatEvent", "superStickerEvent"):
         return
 
@@ -255,23 +300,17 @@ async def handle_message(item: dict, video_id: str, info: dict):
         log.warning("Chưa có tỷ giá cho %s, tính 0 VND", cur)
     vnd = int(amount * RATES_VND.get(cur, 0))
 
-    # Mỗi server theo dõi live này ghi một bản riêng, nên top của từng server độc lập nhau.
     recorded = []
     for gid in gids:
-        # khoản cũ (trước khi tách server) đã được chuyển về server chính với _id gốc
-        if await db.donations.find_one({"_id": item["id"], "guild_id": gid}, {"_id": 1}):
-            continue
+        did = f"{gid}:{item['id']}"
         try:
             await db.donations.insert_one({
-                "_id": f"{gid}:{item['id']}",  # chống trùng khi bot khởi động lại
-                "guild_id": gid,
-                "channel_id": au["channelId"],
-                "video_id": video_id,
-                "stream_channel": info.get("channel_id") or None,  # kênh YouTube đang live
-                "amount": amount,
-                "currency": cur,
-                "vnd": vnd,
-                "comment": d.get("userComment", ""),
+                "_id": did, "guild_id": gid, "channel_id": au["channelId"],
+                "video_id": video_id, "stream_channel": info.get("channel_id") or None,
+                "amount": amount, "currency": cur, "vnd": vnd,
+                "creator_vnd": int(vnd * 0.7),
+                "jewels": 0, "ruby": 0, "ruby_vnd": 0,
+                "kind": "money", "comment": d.get("userComment", ""),
                 "at": datetime.now(timezone.utc),
             })
         except DuplicateKeyError:
@@ -284,6 +323,27 @@ async def handle_message(item: dict, video_id: str, info: dict):
     log.info("Donate %s %s từ %s (%d server)", amount, cur, au["displayName"], len(recorded))
     for gid in recorded:
         await announce(gid, au, d, vnd, info)
+
+
+async def announce_gift(gid: int, au: dict, d: dict, jewels: int, ruby: int,
+                        ruby_vnd: int, stream: dict | None = None):
+    info = await db.channels.find_one({"_id": au["channelId"]}) or {}
+    link = await db.links.find_one({"_id": au["channelId"]})
+    who = f"<@{link['discord_id']}>" if link else (info.get("handle") or au["displayName"])
+    e = discord.Embed(
+        color=discord.Color.purple(),
+        description=(
+            f"{who} gửi quà **{d.get('giftName') or 'YouTube Gift'}**\n"
+            f"💎 {jewels:,} Jewels • 🔴 {ruby:,} Ruby\n"
+            f"Doanh thu ước tính: **{ruby_vnd:,}₫**"
+        ),
+    )
+    e.set_author(name=info.get("handle") or au["displayName"], icon_url=au["profileImageUrl"])
+    if stream and stream.get("channel"):
+        e.set_footer(text=f"Kênh: {stream['channel']}")
+    err = await send_notice(gid, e)
+    if err:
+        log.warning("Không báo được Gift (server %s): %s", gid, err)
 
 
 async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = None):
@@ -331,6 +391,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
         except YTError as e:
             if e.reason in ("liveChatEnded", "liveChatNotFound"):
                 log.info("Live %s đã kết thúc", video_id)
+                await announce_live_end(video_id, info, set(subs.get(video_id, ())))
                 return
             if e.reason in ("quotaExceeded", "rateLimitExceeded"):
                 log.error("Hết quota YouTube, chờ 10 phút")
@@ -680,7 +741,16 @@ async def top_cmd(
     await inter.response.defer()
     rows = await db.donations.aggregate([
         {"$match": {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}},
-        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
+        {"$group": {
+            "_id": "$channel_id",
+            "money": {"$sum": {"$ifNull": ["$vnd", 0]}},
+            "creator_vnd": {"$sum": {"$ifNull": ["$creator_vnd", {"$multiply": [{"$ifNull": ["$vnd", 0]}, 0.7]}]}},
+            "jewels": {"$sum": {"$ifNull": ["$jewels", 0]}},
+            "ruby": {"$sum": {"$ifNull": ["$ruby", 0]}},
+            "ruby_vnd": {"$sum": {"$ifNull": ["$ruby_vnd", 0]}},
+            "count": {"$sum": 1},
+        }},
+        {"$addFields": {"total": {"$add": ["$creator_vnd", "$ruby_vnd"]}}},
         {"$sort": {"total": -1}},
         {"$limit": limit},
     ]).to_list(limit)
@@ -705,13 +775,78 @@ async def top_cmd(
             info = await db.channels.find_one({"_id": cid}) or {}
             link = await db.links.find_one({"_id": cid})
             label = info.get("handle") or info.get("name") or cid
-        line = f"**{row['total']:,}₫** • {row['count']} lượt"
+        line = (f"💵 **{row['money']:,}₫** + 💎 **{row['jewels']:,} Jewels**\n"
+                f"🔴 {row['ruby']:,} Ruby (~{row['ruby_vnd']:,}₫) • {row['count']} lượt\n"
+                f"Chủ kênh ước tính: **{row['total']:,}₫**")
         if link:
             line = f"<@{link['discord_id']}> (ID: `{link['discord_id']}`)\n" + line
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
         embeds.append(e)
     await inter.followup.send(content=f"🏆 **Top donate • {sname}**", embeds=embeds)
+
+
+@bot.tree.command(name="thongkedonate", description="Thống kê donate theo ngày hoặc tháng")
+@app_commands.describe(ky="Chọn thống kê ngày hoặc tháng", kenh="Kênh YouTube cần thống kê")
+@app_commands.choices(ky=[
+    app_commands.Choice(name="Hôm nay", value="day"),
+    app_commands.Choice(name="Tháng này", value="month"),
+])
+@app_commands.guild_only()
+async def thongkedonate_cmd(
+    inter: discord.Interaction,
+    ky: app_commands.Choice[str],
+    kenh: str | None = None,
+):
+    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
+    if err:
+        await inter.response.send_message(err, ephemeral=True)
+        return
+    sid, sname = sc
+    now = datetime.now(timezone(timedelta(hours=7)))
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    label = "hôm nay"
+    if ky.value == "month":
+        start = start.replace(day=1)
+        label = "tháng này"
+    await inter.response.defer()
+    rows = await db.donations.aggregate([
+        {"$match": {
+            "guild_id": inter.guild_id,
+            "stream_channel": None if sid == UNASSIGNED else sid,
+            "at": {"$gte": start.astimezone(timezone.utc)},
+        }},
+        {"$group": {
+            "_id": "$channel_id",
+            "money": {"$sum": {"$ifNull": ["$vnd", 0]}},
+            "jewels": {"$sum": {"$ifNull": ["$jewels", 0]}},
+            "ruby": {"$sum": {"$ifNull": ["$ruby", 0]}},
+            "ruby_vnd": {"$sum": {"$ifNull": ["$ruby_vnd", 0]}},
+            "count": {"$sum": 1},
+        }},
+        {"$addFields": {"total": {"$add": ["$money", "$ruby_vnd"]}}},
+        {"$sort": {"total": -1}},
+        {"$limit": 10},
+    ]).to_list(10)
+    if not rows:
+        await inter.followup.send(f"Chưa có donate {label} ở kênh **{sname}**.")
+        return
+    lines = []
+    for i, row in enumerate(rows, 1):
+        cid = row["_id"]
+        info = await db.channels.find_one({"_id": cid}) or {}
+        name = info.get("handle") or info.get("name") or cid
+        lines.append(
+            f"**{i}. {name}** — {row['money']:,}₫ + {row['jewels']:,} 💎 "
+            f"({row['ruby']:,} Ruby; chủ kênh ~{row['total']:,}₫)"
+        )
+    e = discord.Embed(
+        title=f"📊 Donate {label} • {sname}",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    e.set_footer(text="Top xếp theo doanh thu chủ kênh ước tính: Supers ~70% + Gifts 0,01 USD/Ruby. Chưa trừ thuế/phí áp dụng.")
+    await inter.followup.send(embed=e)
 
 
 @bot.tree.command(name="watch", description="Theo dõi thủ công một live stream (admin)")
