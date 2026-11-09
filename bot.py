@@ -166,6 +166,22 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
     return err
 
 
+async def announce_live_end(vid: str, info: dict, gids: set[int]):
+    e = discord.Embed(
+        title=f"⚫ Livestream đã kết thúc: {info.get('title', vid)}"[:256],
+        url=f"https://www.youtube.com/watch?v={vid}",
+        description=f"Livestream của **{info.get('channel', 'YouTube')}** đã kết thúc. Bot dừng theo dõi live này.",
+        color=discord.Color.dark_grey(),
+    )
+    for gid in gids:
+        if (vid, gid) not in announced:
+            continue
+        err = await send_notice(gid, e)
+        if err:
+            log.warning("Không gửi được thông báo kết thúc live (server %s): %s", gid, err)
+        announced.discard((vid, gid))
+
+
 async def ensure_channel(au: dict):
     """Lưu tên, avatar, @handle của người dùng YouTube."""
     cid = au["channelId"]
@@ -375,6 +391,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
         except YTError as e:
             if e.reason in ("liveChatEnded", "liveChatNotFound"):
                 log.info("Live %s đã kết thúc", video_id)
+                await announce_live_end(video_id, info, set(subs.get(video_id, ())))
                 return
             if e.reason in ("quotaExceeded", "rateLimitExceeded"):
                 log.error("Hết quota YouTube, chờ 10 phút")
