@@ -261,7 +261,7 @@ async def handle_message(item: dict, video_id: str, info: dict):
                     "guild_id": gid, "channel_id": au["channelId"], "video_id": video_id,
                     "stream_channel": info.get("channel_id") or None, "kind": "gift",
                     "gift_name": d.get("giftName") or "YouTube Gift", "jewels": jewels,
-                    "ruby": ruby, "ruby_vnd": ruby_vnd, "vnd": 0,
+                    "ruby": ruby, "ruby_vnd": ruby_vnd, "vnd": 0, "creator_vnd": 0,
                     "at": datetime.now(timezone.utc),
                 }},
                 upsert=True,
@@ -292,6 +292,7 @@ async def handle_message(item: dict, video_id: str, info: dict):
                 "_id": did, "guild_id": gid, "channel_id": au["channelId"],
                 "video_id": video_id, "stream_channel": info.get("channel_id") or None,
                 "amount": amount, "currency": cur, "vnd": vnd,
+                "creator_vnd": int(vnd * 0.7),
                 "jewels": 0, "ruby": 0, "ruby_vnd": 0,
                 "kind": "money", "comment": d.get("userComment", ""),
                 "at": datetime.now(timezone.utc),
@@ -726,12 +727,13 @@ async def top_cmd(
         {"$group": {
             "_id": "$channel_id",
             "money": {"$sum": {"$ifNull": ["$vnd", 0]}},
+            "creator_vnd": {"$sum": {"$ifNull": ["$creator_vnd", {"$multiply": [{"$ifNull": ["$vnd", 0]}, 0.7]}]}},
             "jewels": {"$sum": {"$ifNull": ["$jewels", 0]}},
             "ruby": {"$sum": {"$ifNull": ["$ruby", 0]}},
             "ruby_vnd": {"$sum": {"$ifNull": ["$ruby_vnd", 0]}},
             "count": {"$sum": 1},
         }},
-        {"$addFields": {"total": {"$add": ["$money", "$ruby_vnd"]}}},
+        {"$addFields": {"total": {"$add": ["$creator_vnd", "$ruby_vnd"]}}},
         {"$sort": {"total": -1}},
         {"$limit": limit},
     ]).to_list(limit)
@@ -758,7 +760,7 @@ async def top_cmd(
             label = info.get("handle") or info.get("name") or cid
         line = (f"💵 **{row['money']:,}₫** + 💎 **{row['jewels']:,} Jewels**\n"
                 f"🔴 {row['ruby']:,} Ruby (~{row['ruby_vnd']:,}₫) • {row['count']} lượt\n"
-                f"Tổng xếp hạng: **{row['total']:,}₫**")
+                f"Chủ kênh ước tính: **{row['total']:,}₫**")
         if link:
             line = f"<@{link['discord_id']}> (ID: `{link['discord_id']}`)\n" + line
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
@@ -819,14 +821,14 @@ async def thongkedonate_cmd(
         name = info.get("handle") or info.get("name") or cid
         lines.append(
             f"**{i}. {name}** — {row['money']:,}₫ + {row['jewels']:,} 💎 "
-            f"({row['ruby']:,} Ruby; ~{row['total']:,}₫)"
+            f"({row['ruby']:,} Ruby; chủ kênh ~{row['total']:,}₫)"
         )
     e = discord.Embed(
         title=f"📊 Donate {label} • {sname}",
         description="\n".join(lines),
         color=discord.Color.blurple(),
     )
-    e.set_footer(text="Ruby quy đổi theo 0,01 USD/Ruby; VND là ước tính.")
+    e.set_footer(text="Top xếp theo doanh thu chủ kênh ước tính: Supers ~70% + Gifts 0,01 USD/Ruby. Chưa trừ thuế/phí áp dụng.")
     await inter.followup.send(embed=e)
 
 
