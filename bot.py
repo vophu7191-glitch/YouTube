@@ -63,6 +63,7 @@ watchers: dict[str, asyncio.Task] = {}  # video_id -> tác vụ đọc live chat
 subs: dict[str, set[int]] = {}  # video_id -> các server Discord đang theo dõi video đó
 vinfo: dict[str, dict] = {}  # video_id -> thông tin live (tên, kênh...)
 home_gid: int | None = None  # server chính, xác định lúc khởi động
+message_delete_tasks: set[asyncio.Task] = set()
 ended: set[str] = set()  # video đã live xong, không kiểm tra lại
 
 
@@ -862,7 +863,9 @@ async def on_message(message: discord.Message):
             await message.delete()
         except discord.HTTPException:
             pass
-    asyncio.create_task(delete_source_message())
+    task = asyncio.create_task(delete_source_message())
+    message_delete_tasks.add(task)
+    task.add_done_callback(message_delete_tasks.discard)
 
 
 @bot.tree.error
