@@ -1213,7 +1213,133 @@ async def unlink_cmd(inter: discord.Interaction):
     await inter.response.send_message(f"Đã huỷ {r.deleted_count} liên kết.", ephemeral=True)
 
 
-@bot.tree.command(name="top", description="Bảng xếp hạng top donate của một kênh YouTube trong server này")
+# ---------- Bảng xếp hạng vĩnh viễn (cộng dồn từ trước đến nay, không reset theo tháng/năm) ----------
+RANK_PER = 10  # số người mỗi trang ở danh sách đầy đủ
+
+
+def rank_match(gid: int, sid: str) -> dict:
+    return {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}
+
+
+async def rank_summary(gid: int, sid: str) -> tuple[int, int]:
+    """(số người đã donate, tổng tiền VND) của một kênh trong server."""
+    r = await db.donations.aggregate([
+        {"$match": rank_match(gid, sid)},
+        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}}},
+        {"$group": {"_id": None, "donors": {"$sum": 1}, "sum": {"$sum": "$total"}}},
+    ]).to_list(1)
+    return (r[0]["donors"], r[0]["sum"]) if r else (0, 0)
+
+
+async def rank_page(gid: int, sid: str, skip: int, limit: int) -> list[dict]:
+    # sort thêm _id để khi bằng tiền thì thứ hạng vẫn cố định giữa các trang
+    return await db.donations.aggregate([
+        {"$match": rank_match(gid, sid)},
+        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
+        {"$sort": {"total": -1, "_id": 1}},
+        {"$skip": skip},
+        {"$limit": limit},
+    ]).to_list(limit)
+
+
+async def rank_lines(rows: list[dict], start: int) -> list[str]:
+    ids = [r["_id"] for r in rows if not r["_id"].startswith("dc:")]
+    infos = {c["_id"]: c async for c in db.channels.find({"_id": {"$in": ids}})}
+    links = {k["_id"]: k["discord_id"] async for k in db.links.find({"_id": {"$in": ids}})}
+    out = []
+    for n, r in enumerate(rows, start):
+        cid = r["_id"]
+        if cid.startswith("dc:"):
+            who = f"<@{cid[3:]}>"
+        else:
+            info = infos.get(cid, {})
+            name = str(info.get("handle") or info.get("name") or cid).replace("[", "(").replace("]", ")")
+            who = f"[{discord.utils.escape_markdown(name)}](https://www.youtube.com/channel/{cid})"
+            if cid in links:
+                who += f" • <@{links[cid]}>"
+        out.append(f"**{n}.** {who} — **{r['total']:,}₫** • {r['count']} lượt")
+    return out
+
+
+class RankingView(discord.ui.View):
+    """Danh sách đầy đủ, mỗi trang RANK_PER người: xem cả những người sau top 10."""
+
+    def __init__(self, gid: int, sid: str, sname: str, donors: int, total: int, page: int = 0):
+        super().__init__(timeout=900)
+        self.gid, self.sid, self.sname, self.donors, self.total = gid, sid, sname, donors, total
+        self.pages = max(1, -(-donors // RANK_PER))
+        self.page = min(max(page, 0), self.pages - 1)
+
+    async def embed(self) -> discord.Embed:
+        rows = await rank_page(self.gid, self.sid, self.page * RANK_PER, RANK_PER)
+        lines = await rank_lines(rows, self.page * RANK_PER + 1)
+        e = discord.Embed(
+            title=f"🏆 Bảng xếp hạng vĩnh viễn • {self.sname}"[:256],
+            description="\n".join(lines) or "Chưa có ai.",
+            color=discord.Color.blurple(),
+        )
+        e.set_footer(text=f"Trang {self.page + 1}/{self.pages} • {self.donors} người • tổng {self.total:,}₫")
+        return e
+
+    async def _go(self, inter: discord.Interaction, step: int):
+        self.page = (self.page + step) % self.pages
+        await inter.response.defer()
+        await inter.edit_original_response(embed=await self.embed(), view=self, allowed_mentions=NO_PING)
+
+    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        await self._go(inter, -1)
+
+    @discord.ui.button(label="Sau ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        await self._go(inter, 1)
+
+
+class TopMoreView(discord.ui.View):
+    """Nút dưới /top: mở danh sách đầy đủ (chỉ người bấm thấy) để xem những người sau top 10."""
+
+    def __init__(self, gid: int, sid: str, sname: str, donors: int, total: int, first_page: int):
+        super().__init__(timeout=900)
+        self.args = (gid, sid, sname, donors, total)
+        self.first_page = first_page
+        self.message = None
+
+    @discord.ui.button(label="📋 Xem danh sách đầy đủ", style=discord.ButtonStyle.primary)
+    async def more_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        await inter.response.defer(ephemeral=True)
+        view = RankingView(*self.args, page=self.first_page)
+        await inter.followup.send(embed=await view.embed(), view=view, ephemeral=True, allowed_mentions=NO_PING)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+
+@bot.tree.command(name="bangxephang", description="Danh sách đầy đủ xếp hạng donate vĩnh viễn, gồm cả người ngoài top 10")
+@app_commands.describe(
+    kenh="Kênh cần xem (chọn từ gợi ý). Bỏ trống = tự chọn nếu server chỉ có 1 kênh",
+    trang="Trang bắt đầu (mỗi trang 10 người, trang 2 = hạng 11-20)",
+)
+@app_commands.guild_only()
+async def bangxephang_cmd(inter: discord.Interaction, kenh: str | None = None, trang: app_commands.Range[int, 1, 1000] = 1):
+    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
+    if err:
+        await inter.response.send_message(err, ephemeral=True)
+        return
+    sid, sname = sc
+    await inter.response.defer(ephemeral=True)
+    donors, total = await rank_summary(inter.guild_id, sid)
+    if not donors:
+        await inter.followup.send(f"Chưa có donate nào ở kênh **{sname}**.", ephemeral=True)
+        return
+    view = RankingView(inter.guild_id, sid, sname, donors, total, page=trang - 1)
+    await inter.followup.send(embed=await view.embed(), view=view, ephemeral=True, allowed_mentions=NO_PING)
+
+
+@bot.tree.command(name="top", description="Bảng xếp hạng top donate vĩnh viễn của một kênh YouTube trong server này")
 @app_commands.describe(
     kenh="Kênh cần xem (chọn từ gợi ý). Bỏ trống = tự chọn nếu server chỉ có 1 kênh",
     limit="Số người hiển thị (1-10)",
@@ -1232,9 +1358,9 @@ async def top_cmd(
     sid, sname = sc
     await inter.response.defer()
     rows = await db.donations.aggregate([
-        {"$match": {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}},
+        {"$match": rank_match(gid, sid)},
         {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
-        {"$sort": {"total": -1}},
+        {"$sort": {"total": -1, "_id": 1}},
         {"$limit": limit},
     ]).to_list(limit)
     if not rows:
@@ -1264,7 +1390,13 @@ async def top_cmd(
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
         embeds.append(e)
-    await inter.followup.send(content=f"🏆 **Top donate • {sname}**", embeds=embeds)
+    content = f"🏆 **Top donate vĩnh viễn • {sname}**\n-# Cộng dồn từ trước đến nay, không reset theo tháng hay năm"
+    donors, total = await rank_summary(gid, sid)
+    if donors > limit:  # còn người phía sau -> có nút xem tiếp
+        view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
+        view.message = await inter.followup.send(content=content, embeds=embeds, view=view)
+    else:
+        await inter.followup.send(content=content, embeds=embeds)
 
 
 @bot.tree.command(name="watch", description="Theo dõi thủ công một live stream (admin)")
@@ -1562,6 +1694,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
 
 
 @top_cmd.autocomplete("kenh")
+@bangxephang_cmd.autocomplete("kenh")
 @themdonate_cmd.autocomplete("kenh")
 @nhapdonate_cmd.autocomplete("kenh")
 @gankenh_cmd.autocomplete("kenh")
