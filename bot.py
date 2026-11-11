@@ -212,8 +212,12 @@ async def try_link(code: str, au: dict, gids: list[int]):
     doc = await db.link_codes.find_one_and_delete({"_id": code})
     if not doc or doc["expires"] < datetime.now(timezone.utc):
         return
+    old = await db.links.find_one({"_id": au["channelId"]})
+    if old and int(old.get("discord_id", 0)) != int(doc["discord_id"]):
+        log.warning("Bỏ qua liên kết trùng kênh %s; đã thuộc Discord %s", au["channelId"], old["discord_id"])
+        return
     await db.links.update_one(
-        {"_id": au["channelId"]}, {"$set": {"discord_id": doc["discord_id"]}}, upsert=True
+        {"_id": au["channelId"]}, {"$setOnInsert": {"discord_id": doc["discord_id"]}}, upsert=True
     )
     await migrate_discord_only(doc["discord_id"], au["channelId"])
     await ensure_channel(au)
@@ -922,8 +926,12 @@ async def xacminh_cmd(inter: discord.Interaction, kenh: str):
         )
         return
     cid = au["channelId"]
+    old = await db.links.find_one({"_id": cid})
+    if old and int(old.get("discord_id", 0)) != inter.user.id:
+        await inter.followup.send("Kênh này đã được liên kết với Discord khác. Liên kết cũ được giữ nguyên.")
+        return
     await db.link_codes.delete_one({"_id": code})
-    await db.links.update_one({"_id": cid}, {"$set": {"discord_id": inter.user.id}}, upsert=True)
+    await db.links.update_one({"_id": cid}, {"$setOnInsert": {"discord_id": inter.user.id}}, upsert=True)
     await migrate_discord_only(inter.user.id, cid)
     await ensure_channel(au)
     log.info("Xác minh bằng mô tả kênh: %s ↔ Discord %s", cid, inter.user.id)
