@@ -34,6 +34,10 @@ HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0"))
 # Cần cho danh sách xác minh thủ công. Bật Server Members Intent trong Developer Portal rồi đặt MEMBERS_INTENT=1
 MEMBERS_INTENT = os.getenv("MEMBERS_INTENT", "") == "1"
 PORT = int(os.getenv("PORT", "0"))  # Render Web Service cần; Worker thì bỏ trống
+MESSAGE_CONTENT_INTENT = os.getenv("MESSAGE_CONTENT_INTENT", "") == "1"
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
 
 # Tỷ giá ước lượng về VND để cộng tổng. Hãy chỉnh lại cho đúng ý bạn.
 RATES_VND = {
@@ -636,6 +640,7 @@ class Bot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = MEMBERS_INTENT
+        intents.message_content = MESSAGE_CONTENT_INTENT
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -643,6 +648,8 @@ class Bot(discord.Client):
         global session
         session = aiohttp.ClientSession()
         await db.link_codes.create_index("expires", expireAfterSeconds=0)
+        await db.pending_youtube_links.create_index("expires", expireAfterSeconds=0)
+        await db.youtube_oauth_states.create_index("expires", expireAfterSeconds=0)
         await fix_zero_donations()
         try:
             await backfill_stream_channels()
@@ -655,6 +662,8 @@ class Bot(discord.Client):
         if PORT:
             app = web.Application()
             app.router.add_get("/", lambda r: web.Response(text="ok"))
+            app.router.add_get("/youtube/verify/{token}", youtube_oauth_start)
+            app.router.add_get("/youtube/callback", youtube_oauth_callback)
             runner = web.AppRunner(app)
             await runner.setup()
             await web.TCPSite(runner, "0.0.0.0", PORT).start()
@@ -670,6 +679,178 @@ class Bot(discord.Client):
 
 
 bot = Bot()
+
+
+YOUTUBE_CHANNEL_LINK_RE = re.compile(
+    r"(?:https?://)?(?:www\\.)?youtube\\.com/(?:channel/UC[\\w-]{22}|@[\\w.\\-]+)",
+    re.IGNORECASE,
+)
+
+
+class YouTubeVerifyView(discord.ui.View):
+    def __init__(self, url: str):
+        super().__init__(timeout=300)
+        self.add_item(discord.ui.Button(
+            label="Xác minh tài khoản Google",
+            style=discord.ButtonStyle.link,
+            url=url,
+        ))
+
+
+async def youtube_oauth_start(request: web.Request):
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI):
+        return web.Response(text="OAuth Google chưa được cấu hình trên Render.", status=503)
+    token = request.match_info["token"]
+    pending = await db.pending_youtube_links.find_one({
+        "_id": token,
+        "expires": {"$gt": datetime.now(timezone.utc)},
+    })
+    if not pending:
+        return web.Response(text="Yêu cầu xác minh không tồn tại hoặc đã hết hạn.", status=410)
+    state = secrets.token_urlsafe(32)
+    await db.youtube_oauth_states.insert_one({
+        "_id": state,
+        "pending_id": token,
+        "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
+    })
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/youtube.readonly",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    raise web.HTTPFound("https://accounts.google.com/o/oauth2/v2/auth?" + __import__("urllib.parse").parse.urlencode(params))
+
+
+async def youtube_oauth_callback(request: web.Request):
+    state = request.query.get("state", "")
+    code = request.query.get("code", "")
+    oauth_state = await db.youtube_oauth_states.find_one_and_delete({
+        "_id": state,
+        "expires": {"$gt": datetime.now(timezone.utc)},
+    }) if state else None
+    if not oauth_state:
+        return web.Response(text="Yêu cầu xác minh không hợp lệ hoặc đã hết hạn.", status=400)
+    pending = await db.pending_youtube_links.find_one_and_delete({
+        "_id": oauth_state["pending_id"],
+        "expires": {"$gt": datetime.now(timezone.utc)},
+    })
+    if not pending:
+        return web.Response(text="Yêu cầu xác minh đã hết hạn.", status=410)
+    if request.query.get("error") or not code:
+        await notify_youtube_link_result(pending, False, "Bạn đã từ chối hoặc hủy cấp quyền Google.")
+        return web.Response(text="Bạn đã hủy xác minh. Bạn có thể đóng trang này.")
+    try:
+        async with session.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as response:
+            token_data = await response.json()
+            if response.status != 200 or not token_data.get("access_token"):
+                raise ValueError("Google không cấp access token hợp lệ.")
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/channels",
+            params={"part": "id,snippet", "mine": "true"},
+            headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as response:
+            channel_data = await response.json()
+            if response.status != 200:
+                raise ValueError("Không thể đọc danh sách kênh YouTube từ Google.")
+        channels = channel_data.get("items", [])
+        match = next((item for item in channels if item.get("id") == pending["channel_id"]), None)
+        if not match:
+            await notify_youtube_link_result(
+                pending, False,
+                "Tài khoản Google vừa xác thực không quản lý kênh YouTube trong link bạn đã gửi.",
+            )
+            return web.Response(text="Tài khoản Google không quản lý kênh đã gửi. Liên kết bị từ chối.")
+        channel_id = match["id"]
+        old = await db.links.find_one({"_id": channel_id})
+        if old and int(old.get("discord_id", 0)) != int(pending["discord_id"]):
+            await notify_youtube_link_result(pending, False, "Kênh này đã được liên kết với một tài khoản Discord khác.")
+            return web.Response(text="Kênh đã được liên kết với tài khoản Discord khác. Không thay đổi liên kết cũ.")
+        snippet = match.get("snippet", {})
+        thumbnails = snippet.get("thumbnails", {})
+        avatar = (thumbnails.get("default") or thumbnails.get("medium") or {}).get("url", "")
+        au = {
+            "channelId": channel_id,
+            "displayName": snippet.get("title", "YouTube channel"),
+            "profileImageUrl": avatar,
+        }
+        await db.links.update_one(
+            {"_id": channel_id},
+            {"$set": {"discord_id": int(pending["discord_id"]), "verified_at": datetime.now(timezone.utc), "verified_by": "google_oauth"}},
+            upsert=True,
+        )
+        await migrate_discord_only(int(pending["discord_id"]), channel_id)
+        await ensure_channel(au)
+        await notify_youtube_link_result(pending, True, au["displayName"])
+        return web.Response(text="Xác minh thành công! Kênh YouTube đã được liên kết với Discord.")
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
+        log.exception("Google OAuth verification failed")
+        await notify_youtube_link_result(pending, False, "Có lỗi khi xác minh với Google. Vui lòng thử lại.")
+        return web.Response(text="Không thể hoàn tất xác minh. Vui lòng thử lại sau.", status=502)
+
+
+async def notify_youtube_link_result(pending: dict, success: bool, detail: str):
+    try:
+        user = await bot.fetch_user(int(pending["discord_id"]))
+        if success:
+            await user.send(f"✅ Đã xác minh và liên kết kênh YouTube **{detail}** với Discord của bạn.")
+        else:
+            await user.send(f"❌ Xác minh YouTube thất bại: {detail}")
+    except (discord.HTTPException, KeyError):
+        pass
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild or not MESSAGE_CONTENT_INTENT:
+        return
+    match = YOUTUBE_CHANNEL_LINK_RE.search(message.content)
+    if not match:
+        return
+    try:
+        au = await resolve_youtube(match.group(0))
+    except YTError:
+        return
+    if not au:
+        return
+    token = secrets.token_urlsafe(24)
+    await db.pending_youtube_links.insert_one({
+        "_id": token,
+        "discord_id": message.author.id,
+        "guild_id": message.guild.id,
+        "channel_id": au["channelId"],
+        "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
+    })
+    base = GOOGLE_REDIRECT_URI.rsplit("/youtube/callback", 1)[0] if GOOGLE_REDIRECT_URI else ""
+    verify_url = f"{base}/youtube/verify/{token}" if base else ""
+    if not verify_url:
+        await message.channel.send("Chức năng xác minh Google chưa được cấu hình. Vui lòng báo quản trị viên.")
+        return
+    await message.channel.send(
+        f"{message.author.mention}, hãy xác minh quyền quản lý kênh **{au['displayName']}**:",
+        view=YouTubeVerifyView(verify_url),
+    )
+    async def delete_source_message():
+        await asyncio.sleep(300)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+    asyncio.create_task(delete_source_message())
 
 
 @bot.tree.error
