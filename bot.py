@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import os
+import random
 import re
 import secrets
 import string
@@ -648,6 +649,7 @@ class Bot(discord.Client):
         except Exception:
             log.exception("Không gán được kênh cho donate cũ (sẽ thử lại lần khởi động sau)")
         await db.donations.create_index([("guild_id", 1), ("stream_channel", 1)])
+        await db.reviews.create_index([("guild_id", 1), ("cycle", 1), ("status", 1)])
         await self.tree.sync()
         self._boot_task = asyncio.create_task(self._after_ready())
         if PORT:
@@ -761,10 +763,125 @@ async def unlinked_members(guild: discord.Guild, query: str = "") -> list[int]:
     return [m.id for m in out]
 
 
+async def link_member(gid: int, uid: int, text: str, by: int):
+    """Admin xác minh thủ công: gắn kênh YouTube `text` cho thành viên Discord `uid`.
+    Trả về (au, None) nếu thành công, hoặc (None, lý do lỗi)."""
+    try:
+        au = await resolve_youtube(text)
+    except YTError as e:
+        return None, f"Lỗi YouTube: {e}"
+    if not au:
+        return None, "Không tìm thấy kênh YouTube này."
+    cid = au["channelId"]
+    old = await db.links.find_one({"_id": cid})
+    if old and old["discord_id"] != uid:
+        return None, f"Kênh này đang liên kết với <@{old['discord_id']}>. Dùng `/huylienket` để huỷ liên kết cũ trước."
+    now = datetime.now(timezone.utc)
+    await db.links.update_one(
+        {"_id": cid},
+        {"$set": {"discord_id": uid, "verified_by": by, "guild_id": gid, "verified_at": now}},
+        upsert=True,
+    )
+    await migrate_discord_only(uid, cid)
+    await ensure_channel(au)
+    # nếu người này từng nằm trong danh sách kiểm ngẫu nhiên thì ghi nhận là đã liên kết
+    await db.reviews.update_one(
+        {"_id": f"{gid}:{uid}", "status": {"$ne": "linked"}},
+        {"$set": {"status": "linked", "reason": None, "yt": cid, "by": by, "at": now}},
+    )
+    return au, None
+
+
+# ---------- Kiểm tra liên kết ngẫu nhiên (/randomlienket) ----------
+REVIEW_BATCH = 10  # mỗi lượt bốc bao nhiêu người
+review_locks: dict[int, asyncio.Lock] = {}
+
+
+async def review_draw(guild: discord.Guild) -> dict:
+    """Bốc tối đa REVIEW_BATCH thành viên chưa liên kết, KHÔNG trùng người đã kiểm trong vòng hiện tại.
+    - Còn người bốc dở (chưa đánh dấu) -> đưa lại đúng những người đó, chưa bốc người mới.
+    - Hết người trong vòng -> sang vòng mới (khi đó mới được kiểm lại những người đã kiểm).
+    reviews: _id = "guild:user"; status pending | unlinked (kèm reason) | linked; cycle = số vòng."""
+    gid = guild.id
+    async with review_locks.setdefault(gid, asyncio.Lock()):
+        cyc = int((await guild_cfg(gid)).get("review_cycle") or 1)
+        members = {m.id for m in guild.members if not m.bot}
+        linked = {d["discord_id"] async for d in db.links.find({}, {"discord_id": 1})}
+        pool = members - linked  # những người cần kiểm
+
+        reviewed: set[int] = set()  # đã đánh dấu chưa liên kết trong vòng này
+        touched: set[int] = set()   # đã đụng tới trong vòng này (kể cả đang chờ)
+        pending: list[dict] = []
+        async for r in db.reviews.find({"guild_id": gid, "cycle": cyc}, {"user_id": 1, "status": 1, "prev": 1}):
+            uid = r["user_id"]
+            if r["status"] == "pending":
+                if uid not in members:  # đã rời server
+                    await db.reviews.delete_one({"_id": r["_id"]})
+                    continue
+                if uid in linked:  # được liên kết ở chỗ khác trong lúc chờ
+                    await db.reviews.update_one(
+                        {"_id": r["_id"]}, {"$set": {"status": "linked", "reason": None, "at": datetime.now(timezone.utc)}}
+                    )
+                    continue
+                pending.append(r)
+            elif r["status"] == "unlinked" and uid in members:
+                reviewed.add(uid)
+            touched.add(uid)
+        candidates = sorted(pool - touched)
+
+        res = {"cycle": cyc, "new_cycle": False, "resumed": False, "prevs": {}, "ids": [], "all_linked": False}
+        if pending:
+            res["resumed"] = True
+            npend = len(pending)
+            pending = pending[:REVIEW_BATCH]
+            res["ids"] = [r["user_id"] for r in pending]
+            res["prevs"] = {r["user_id"]: r["prev"] for r in pending if r.get("prev")}
+            res["done"] = len(reviewed)
+            res["total"] = len(reviewed) + npend + len(candidates)
+            return res
+
+        if not candidates:
+            if not pool:  # ai cũng liên kết rồi
+                res["all_linked"] = True
+                return res
+            cyc += 1  # kiểm hết một vòng -> sang vòng mới, lúc này mới được kiểm lại
+            await db.guilds.update_one({"_id": gid}, {"$set": {"review_cycle": cyc}}, upsert=True)
+            candidates, reviewed = sorted(pool), set()
+            res.update(cycle=cyc, new_cycle=True)
+
+        ids = random.sample(candidates, min(REVIEW_BATCH, len(candidates)))
+        olds = {
+            o["user_id"]: o
+            async for o in db.reviews.find({"_id": {"$in": [f"{gid}:{u}" for u in ids]}})
+        }
+        now = datetime.now(timezone.utc)
+        for uid in ids:
+            doc = {"_id": f"{gid}:{uid}", "guild_id": gid, "user_id": uid, "cycle": cyc,
+                   "status": "pending", "reason": None, "by": None, "at": now}
+            o = olds.get(uid)
+            if o and o.get("status") in ("unlinked", "linked") and o.get("cycle") != cyc:
+                doc["prev"] = {"cycle": o["cycle"], "status": o["status"], "reason": o.get("reason")}
+                res["prevs"][uid] = doc["prev"]
+            await db.reviews.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+        res["ids"] = ids
+        res["done"] = len(reviewed)
+        res["total"] = len(reviewed) + len(candidates)
+        return res
+
+
+async def review_mark_unlinked(gid: int, uid: int, cycle: int, by: int, reason: str) -> bool:
+    """Đánh dấu 'chưa liên kết' kèm lý do. False nếu người này không còn ở trạng thái chờ (đã có người khác xử lý)."""
+    r = await db.reviews.update_one(
+        {"_id": f"{gid}:{uid}", "status": "pending", "cycle": cycle},
+        {"$set": {"status": "unlinked", "reason": reason, "by": by, "at": datetime.now(timezone.utc)}},
+    )
+    return r.modified_count == 1
+
+
 class LinkModal(discord.ui.Modal, title="Liên kết YouTube"):
     kenh = discord.ui.TextInput(label="Kênh YouTube (@handle, link hoặc ID)", placeholder="@tenkenh", max_length=200)
 
-    def __init__(self, owner: "UnlinkedView"):
+    def __init__(self, owner):  # owner: UnlinkedView hoặc RandomReviewView (cần có apply_link)
         super().__init__()
         self.owner = owner
 
@@ -775,9 +892,10 @@ class LinkModal(discord.ui.Modal, title="Liên kết YouTube"):
 class UnlinkedView(discord.ui.View):
     """Hiện từng thành viên chưa liên kết. Người đã xác minh sẽ biến mất khỏi danh sách."""
 
-    def __init__(self, guild: discord.Guild, ids: list[int], owner_id: int):
+    def __init__(self, guild: discord.Guild, ids: list[int], owner_id: int, marks: dict | None = None):
         super().__init__(timeout=900)
         self.guild, self.ids, self.owner_id, self.i = guild, ids, owner_id, 0
+        self.marks = marks or {}  # uid -> bản ghi kiểm ngẫu nhiên (đã đánh dấu chưa liên kết + lý do)
 
     async def interaction_check(self, inter: discord.Interaction) -> bool:
         if inter.user.id != self.owner_id:
@@ -789,14 +907,15 @@ class UnlinkedView(discord.ui.View):
         if not self.ids:
             return discord.Embed(description="🎉 Không còn ai chưa liên kết trong danh sách.", color=discord.Color.green())
         uid = self.ids[self.i]
-        e = discord.Embed(
-            color=discord.Color.orange(),
-            description=(
-                f"<@{uid}> : **chưa liên kết**\nID: `{uid}`\n\n"
-                "Bấm vào tên để xem profile, mục **Kết Nối** có YouTube không. "
-                "Nếu có, bấm **Liên kết** rồi nhập @handle."
-            ),
+        text = (
+            f"<@{uid}> : **chưa liên kết**\nID: `{uid}`\n\n"
+            "Bấm vào tên để xem profile, mục **Kết Nối** có YouTube không. "
+            "Nếu có, bấm **Liên kết** rồi nhập @handle."
         )
+        mk = self.marks.get(uid)
+        if mk:
+            text += f"\n\n📝 Đã kiểm (vòng {mk.get('cycle', '?')}): chưa liên kết — {str(mk.get('reason') or '—')[:300]}"
+        e = discord.Embed(color=discord.Color.orange(), description=text)
         m = self.guild.get_member(uid)
         if m:
             e.set_author(name=m.display_name, icon_url=m.display_avatar.url)
@@ -828,31 +947,11 @@ class UnlinkedView(discord.ui.View):
         if not self.ids:
             return
         uid = self.ids[self.i]
-        try:
-            au = await resolve_youtube(text)
-        except YTError as e:
-            await inter.followup.send(f"Lỗi YouTube: {e}", ephemeral=True)
+        au, err = await link_member(self.guild.id, uid, text, inter.user.id)
+        if err:
+            await inter.followup.send(err, ephemeral=True, allowed_mentions=NO_PING)
             return
-        if not au:
-            await inter.followup.send("Không tìm thấy kênh YouTube này.", ephemeral=True)
-            return
-        cid = au["channelId"]
-        old = await db.links.find_one({"_id": cid})
-        if old and old["discord_id"] != uid:
-            await inter.followup.send(
-                f"Kênh này đang liên kết với <@{old['discord_id']}>. Dùng `/huylienket` để huỷ liên kết cũ trước.",
-                ephemeral=True, allowed_mentions=NO_PING,
-            )
-            return
-        await db.links.update_one(
-            {"_id": cid},
-            {"$set": {"discord_id": uid, "verified_by": inter.user.id, "guild_id": self.guild.id,
-                      "verified_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
-        await migrate_discord_only(uid, cid)
-        await ensure_channel(au)
-        info = await db.channels.find_one({"_id": cid}) or {}
+        info = await db.channels.find_one({"_id": au["channelId"]}) or {}
         self.ids.pop(self.i)
         if self.i >= len(self.ids):
             self.i = 0
@@ -909,8 +1008,170 @@ async def dslk_cmd(inter: discord.Interaction, tim: str = ""):
     await inter.response.defer(ephemeral=True)
     if not inter.guild.chunked:
         await inter.guild.chunk()
-    view = UnlinkedView(inter.guild, await unlinked_members(inter.guild, tim), inter.user.id)
+    marks = {
+        r["user_id"]: r
+        async for r in db.reviews.find({"guild_id": inter.guild.id, "status": "unlinked"})
+    }
+    view = UnlinkedView(inter.guild, await unlinked_members(inter.guild, tim), inter.user.id, marks)
     await inter.followup.send(embed=view.embed(), view=view, allowed_mentions=NO_PING)
+
+
+class ReasonModal(discord.ui.Modal, title="Chưa liên kết YouTube"):
+    ly_do = discord.ui.TextInput(
+        label="Lý do (bắt buộc)", style=discord.TextStyle.paragraph, min_length=3, max_length=300,
+        placeholder="VD: Mục Kết Nối trống / chỉ có Twitch / profile để ẩn",
+    )
+
+    def __init__(self, owner: "RandomReviewView"):
+        super().__init__()
+        self.owner = owner
+
+    async def on_submit(self, inter: discord.Interaction):
+        await self.owner.mark_unlinked(inter, str(self.ly_do))
+
+
+class RandomReviewView(discord.ui.View):
+    """Một lượt kiểm ngẫu nhiên: xem từng người, có YouTube thì liên kết, không có thì ghi lý do."""
+
+    def __init__(self, guild: discord.Guild, batch: dict, owner_id: int):
+        super().__init__(timeout=900)
+        self.guild, self.owner_id, self.i = guild, owner_id, 0
+        self.ids = list(batch["ids"])
+        self.cycle, self.done, self.total = batch["cycle"], batch["done"], batch["total"]
+        self.prevs = batch.get("prevs", {})
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.owner_id:
+            await inter.response.send_message("Bảng này của người đã gõ lệnh.", ephemeral=True)
+            return False
+        return True
+
+    def embed(self) -> discord.Embed:
+        outside = self.total - self.done - len(self.ids)  # còn lại ngoài lượt này
+        if not self.ids:
+            if outside <= 0:
+                text = (f"🎉 **Xong vòng {self.cycle}**: đã kiểm hết mọi thành viên chưa liên kết.\n"
+                        f"Gõ `/randomlienket` lần nữa để bắt đầu **vòng {self.cycle + 1}**.")
+            else:
+                text = "✅ **Xong lượt này.** Gõ `/randomlienket` để bốc 10 người tiếp theo."
+            e = discord.Embed(description=text, color=discord.Color.green())
+            e.set_footer(text=f"Vòng {self.cycle} • đã kiểm {self.done}/{self.total}")
+            return e
+        uid = self.ids[self.i]
+        text = (
+            f"<@{uid}>\nID: `{uid}`\n\n"
+            "Bấm vào tên để xem profile, mục **Kết Nối** có YouTube không.\n"
+            "• Có → **✅ Có YouTube** rồi nhập @handle\n"
+            "• Không → **❌ Chưa liên kết** rồi nhập lý do (bắt buộc)"
+        )
+        pv = self.prevs.get(uid)
+        if pv:
+            kq = "đã liên kết" if pv.get("status") == "linked" else f"chưa liên kết — {str(pv.get('reason') or '—')[:200]}"
+            text += f"\n\n📝 Vòng {pv.get('cycle', '?')} trước: {kq}"
+        e = discord.Embed(color=discord.Color.blurple(), description=text)
+        m = self.guild.get_member(uid)
+        if m:
+            e.set_author(name=m.display_name, icon_url=m.display_avatar.url)
+            e.set_thumbnail(url=m.display_avatar.url)
+        e.set_footer(
+            text=f"Vòng {self.cycle} • người {self.i + 1}/{len(self.ids)} trong lượt • "
+                 f"đã kiểm {self.done}/{self.total} • còn {outside} người ngoài lượt này"
+        )
+        return e
+
+    async def _advance(self, inter: discord.Interaction, content: str | None):
+        """Bỏ người vừa xử lý ra khỏi lượt rồi cập nhật bảng."""
+        self.ids.pop(self.i)
+        if self.i >= len(self.ids):
+            self.i = 0
+        if not self.ids:
+            for c in self.children:
+                c.disabled = True
+        await inter.edit_original_response(content=content, embed=self.embed(), view=self, allowed_mentions=NO_PING)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if self.ids:
+            self.i = (self.i - 1) % len(self.ids)
+        await inter.response.edit_message(content=None, embed=self.embed(), view=self)
+
+    @discord.ui.button(label="✅ Có YouTube", style=discord.ButtonStyle.success)
+    async def yes_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if not self.ids:
+            await inter.response.defer()
+            return
+        await inter.response.send_modal(LinkModal(self))
+
+    @discord.ui.button(label="❌ Chưa liên kết", style=discord.ButtonStyle.danger)
+    async def no_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if not self.ids:
+            await inter.response.defer()
+            return
+        await inter.response.send_modal(ReasonModal(self))
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if self.ids:
+            self.i = (self.i + 1) % len(self.ids)
+        await inter.response.edit_message(content=None, embed=self.embed(), view=self)
+
+    async def apply_link(self, inter: discord.Interaction, text: str):
+        await inter.response.defer()
+        if not self.ids:
+            return
+        uid = self.ids[self.i]
+        au, err = await link_member(self.guild.id, uid, text, inter.user.id)
+        if err:
+            await inter.followup.send(err, ephemeral=True, allowed_mentions=NO_PING)
+            return
+        info = await db.channels.find_one({"_id": au["channelId"]}) or {}
+        self.total -= 1  # người đã liên kết thì không cần kiểm nữa
+        await self._advance(inter, f"✅ <@{uid}> ↔ {info.get('handle') or au['displayName']}")
+
+    async def mark_unlinked(self, inter: discord.Interaction, reason: str):
+        reason = " ".join(reason.split())
+        if len(reason) < 3:  # chặn cả lý do chỉ toàn dấu cách
+            await inter.response.send_message("❌ Phải nhập lý do (ít nhất 3 ký tự).", ephemeral=True)
+            return
+        await inter.response.defer()
+        if not self.ids:
+            return
+        uid = self.ids[self.i]
+        ok = await review_mark_unlinked(self.guild.id, uid, self.cycle, inter.user.id, reason)
+        if ok:
+            self.done += 1
+            note = f"📝 <@{uid}> : chưa liên kết — {reason[:100]}"
+        else:  # đã có người khác xử lý người này (hoặc vừa được liên kết)
+            self.total -= 1
+            note = f"⚠️ <@{uid}> đã được xử lý ở nơi khác, bỏ qua."
+        await self._advance(inter, note)
+
+
+@bot.tree.command(name="randomlienket", description="Bốc ngẫu nhiên 10 thành viên để kiểm tra liên kết YouTube (admin)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def randomlienket_cmd(inter: discord.Interaction):
+    if not MEMBERS_INTENT:
+        await inter.response.send_message(MEMBERS_HELP, ephemeral=True)
+        return
+    await inter.response.defer(ephemeral=True)
+    if not inter.guild.chunked:
+        await inter.guild.chunk()
+    batch = await review_draw(inter.guild)
+    if not batch["ids"]:
+        await inter.followup.send(
+            "🎉 Mọi thành viên (không tính bot) đều đã liên kết YouTube, không còn ai để kiểm.", ephemeral=True
+        )
+        return
+    view = RandomReviewView(inter.guild, batch, inter.user.id)
+    n = len(batch["ids"])
+    if batch["new_cycle"]:
+        banner = f"🔄 **Bắt đầu vòng {batch['cycle']}**: đã kiểm hết vòng trước, được kiểm lại từ đầu. Bốc {n} người."
+    elif batch["resumed"]:
+        banner = f"↩️ Lượt trước còn dang dở, tiếp tục {n} người này (chưa bốc người mới)."
+    else:
+        banner = f"🎲 Vòng {batch['cycle']}: bốc ngẫu nhiên {n} người."
+    await inter.followup.send(content=banner, embed=view.embed(), view=view, allowed_mentions=NO_PING)
 
 
 @bot.tree.command(name="bangxacminh", description="Bảng những thành viên đã liên kết YouTube trong server này (admin)")
