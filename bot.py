@@ -760,7 +760,7 @@ async def youtube_oauth_callback(request: web.Request):
                 raise ValueError("Google không cấp access token hợp lệ.")
         async with session.get(
             "https://www.googleapis.com/youtube/v3/channels",
-            params={"part": "id,snippet", "mine": "true"},
+            params={"part": "id,snippet", "mine": "true", "maxResults": 50},
             headers={"Authorization": f"Bearer {token_data['access_token']}"},
             timeout=aiohttp.ClientTimeout(total=20),
         ) as response:
@@ -788,11 +788,19 @@ async def youtube_oauth_callback(request: web.Request):
             "displayName": snippet.get("title", "YouTube channel"),
             "profileImageUrl": avatar,
         }
-        await db.links.update_one(
-            {"_id": channel_id},
-            {"$set": {"discord_id": int(pending["discord_id"]), "verified_at": datetime.now(timezone.utc), "verified_by": "google_oauth"}},
-            upsert=True,
-        )
+        try:
+            await db.links.update_one(
+                {"_id": channel_id},
+                {"$setOnInsert": {
+                    "discord_id": int(pending["discord_id"]),
+                    "verified_at": datetime.now(timezone.utc),
+                    "verified_by": "google_oauth",
+                }},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            await notify_youtube_link_result(pending, False, "Kênh vừa được liên kết với tài khoản Discord khác.")
+            return web.Response(text="Kênh đã được liên kết với tài khoản Discord khác. Không thay đổi liên kết cũ.")
         await migrate_discord_only(int(pending["discord_id"]), channel_id)
         await ensure_channel(au)
         await notify_youtube_link_result(pending, True, au["displayName"])
