@@ -9,6 +9,7 @@ import re
 import secrets
 import string
 import uuid
+from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -727,7 +728,7 @@ async def youtube_oauth_start(request: web.Request):
         "access_type": "online",
         "prompt": "select_account",
     }
-    raise web.HTTPFound("https://accounts.google.com/o/oauth2/v2/auth?" + __import__("urllib.parse").parse.urlencode(params))
+    raise web.HTTPFound("https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params))
 
 
 async def youtube_oauth_callback(request: web.Request):
