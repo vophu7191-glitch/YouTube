@@ -682,7 +682,7 @@ bot = Bot()
 
 
 YOUTUBE_CHANNEL_LINK_RE = re.compile(
-    r"(?:https?://)?(?:www\\.)?youtube\\.com/(?:channel/UC[\\w-]{22}|@[\\w.\\-]+)",
+    r"(?:https?://)?(?:www\.)?youtube\.com/(?:channel/UC[\w-]{22}|@[\w.\-]+)",
     re.IGNORECASE,
 )
 
