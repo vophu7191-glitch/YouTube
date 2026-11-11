@@ -30,6 +30,8 @@ YT_CHANNELS = [c.strip() for c in os.getenv("YT_CHANNEL_ID", "").split(",") if c
 ANNOUNCE_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", "0"))  # tuỳ chọn: kênh báo donate của server chính
 # Server chính: nhận dữ liệu cũ (trước khi tách server). Bỏ trống = tự chọn nếu bot chỉ ở đúng 1 server.
 HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0"))
+# Cần cho danh sách xác minh thủ công. Bật Server Members Intent trong Developer Portal rồi đặt MEMBERS_INTENT=1
+MEMBERS_INTENT = os.getenv("MEMBERS_INTENT", "") == "1"
 PORT = int(os.getenv("PORT", "0"))  # Render Web Service cần; Worker thì bỏ trống
 
 # Tỷ giá ước lượng về VND để cộng tổng. Hãy chỉnh lại cho đúng ý bạn.
@@ -45,6 +47,10 @@ RATES_VND = {
     "EGP": 500, "ISK": 190, "PKR": 90, "BDT": 210,
 }
 
+# Quà Ngọc (Jewels) tính theo số tiền CHỦ KÊNH NHẬN: 2 Ngọc = 1 Ruby, 100 Ruby = 1 USD
+# => 1 Ngọc = 0,005 USD. Muốn tự đặt số VND/Ngọc thì thêm biến JEWEL_RATE_VND.
+JEWEL_RATE_VND = float(os.getenv("JEWEL_RATE_VND") or RATES_VND.get("USD", 25400) * 0.005)
+RATES_VND["JEWEL"] = JEWEL_RATE_VND  # loại tiền ảo "JEWEL" = Ngọc
 CODE_RE = re.compile(r"DC-[A-Z0-9]{6}")
 db = AsyncIOMotorClient(MONGO_URI, tz_aware=True)[os.getenv("DB_NAME", "superchat")]
 session: aiohttp.ClientSession | None = None
@@ -166,22 +172,6 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
     return err
 
 
-async def announce_live_end(vid: str, info: dict, gids: set[int]):
-    e = discord.Embed(
-        title=f"⚫ Livestream đã kết thúc: {info.get('title', vid)}"[:256],
-        url=f"https://www.youtube.com/watch?v={vid}",
-        description=f"Livestream của **{info.get('channel', 'YouTube')}** đã kết thúc. Bot dừng theo dõi live này.",
-        color=discord.Color.dark_grey(),
-    )
-    for gid in gids:
-        if (vid, gid) not in announced:
-            continue
-        err = await send_notice(gid, e)
-        if err:
-            log.warning("Không gửi được thông báo kết thúc live (server %s): %s", gid, err)
-        announced.discard((vid, gid))
-
-
 async def ensure_channel(au: dict):
     """Lưu tên, avatar, @handle của người dùng YouTube."""
     cid = au["channelId"]
@@ -262,32 +252,7 @@ async def handle_message(item: dict, video_id: str, info: dict):
         return
 
     if kind == "giftEvent":
-        d = sn.get("giftDetails") or {}
-        jewels = max(0, int(d.get("jewelsAmount") or 0)) * max(1, int(d.get("comboCount") or 1))
-        if not jewels:
-            return
-        ruby = jewels // 2
-        ruby_vnd = int(ruby * RATES_VND["USD"] / 100)
-        recorded = []
-        for gid in gids:
-            did = f"{gid}:{item['id']}"
-            result = await db.donations.update_one(
-                {"_id": did},
-                {"$set": {
-                    "guild_id": gid, "channel_id": au["channelId"], "video_id": video_id,
-                    "stream_channel": info.get("channel_id") or None, "kind": "gift",
-                    "gift_name": d.get("giftName") or "YouTube Gift", "jewels": jewels,
-                    "ruby": ruby, "ruby_vnd": ruby_vnd, "vnd": 0, "creator_vnd": 0,
-                    "at": datetime.now(timezone.utc),
-                }},
-                upsert=True,
-            )
-            if result.upserted_id:
-                recorded.append(gid)
-        if recorded:
-            await ensure_channel(au)
-            for gid in recorded:
-                await announce_gift(gid, au, d, jewels, ruby, ruby_vnd, info)
+        await handle_gift(item, video_id, info, gids)
         return
 
     if kind not in ("superChatEvent", "superStickerEvent"):
@@ -300,17 +265,23 @@ async def handle_message(item: dict, video_id: str, info: dict):
         log.warning("Chưa có tỷ giá cho %s, tính 0 VND", cur)
     vnd = int(amount * RATES_VND.get(cur, 0))
 
+    # Mỗi server theo dõi live này ghi một bản riêng, nên top của từng server độc lập nhau.
     recorded = []
     for gid in gids:
-        did = f"{gid}:{item['id']}"
+        # khoản cũ (trước khi tách server) đã được chuyển về server chính với _id gốc
+        if await db.donations.find_one({"_id": item["id"], "guild_id": gid}, {"_id": 1}):
+            continue
         try:
             await db.donations.insert_one({
-                "_id": did, "guild_id": gid, "channel_id": au["channelId"],
-                "video_id": video_id, "stream_channel": info.get("channel_id") or None,
-                "amount": amount, "currency": cur, "vnd": vnd,
-                "creator_vnd": int(vnd * 0.7),
-                "jewels": 0, "ruby": 0, "ruby_vnd": 0,
-                "kind": "money", "comment": d.get("userComment", ""),
+                "_id": f"{gid}:{item['id']}",  # chống trùng khi bot khởi động lại
+                "guild_id": gid,
+                "channel_id": au["channelId"],
+                "video_id": video_id,
+                "stream_channel": info.get("channel_id") or None,  # kênh YouTube đang live
+                "amount": amount,
+                "currency": cur,
+                "vnd": vnd,
+                "comment": d.get("userComment", ""),
                 "at": datetime.now(timezone.utc),
             })
         except DuplicateKeyError:
@@ -325,25 +296,40 @@ async def handle_message(item: dict, video_id: str, info: dict):
         await announce(gid, au, d, vnd, info)
 
 
-async def announce_gift(gid: int, au: dict, d: dict, jewels: int, ruby: int,
-                        ruby_vnd: int, stream: dict | None = None):
-    info = await db.channels.find_one({"_id": au["channelId"]}) or {}
-    link = await db.links.find_one({"_id": au["channelId"]})
-    who = f"<@{link['discord_id']}>" if link else (info.get("handle") or au["displayName"])
-    e = discord.Embed(
-        color=discord.Color.purple(),
-        description=(
-            f"{who} gửi quà **{d.get('giftName') or 'YouTube Gift'}**\n"
-            f"💎 {jewels:,} Jewels • 🔴 {ruby:,} Ruby\n"
-            f"Doanh thu ước tính: **{ruby_vnd:,}₫**"
-        ),
-    )
-    e.set_author(name=info.get("handle") or au["displayName"], icon_url=au["profileImageUrl"])
-    if stream and stream.get("channel"):
-        e.set_footer(text=f"Kênh: {stream['channel']}")
-    err = await send_notice(gid, e)
-    if err:
-        log.warning("Không báo được Gift (server %s): %s", gid, err)
+async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
+    """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""
+    au = item["authorDetails"]
+    g = (item["snippet"].get("giftEventDetails") or {}).get("giftMetadata") or {}
+    combo = max(int(g.get("comboCount") or 1), 1)
+    jewels = int(g.get("jewelsAmount") or 0) * combo  # nếu số liệu lệch, sửa đúng dòng này
+    if jewels <= 0 or not gids:
+        return
+    vnd = int(jewels * JEWEL_RATE_VND)
+    name = g.get("giftName") or "quà"
+    note = f"🎁 {name}" + (f" x{combo}" if combo > 1 else "")
+    new = []
+    for gid in gids:
+        res = await db.donations.update_one(
+            {"_id": f"{gid}:{item['id']}"},
+            {
+                "$set": {"amount": jewels, "vnd": vnd, "comment": note},
+                "$setOnInsert": {
+                    "guild_id": gid, "channel_id": au["channelId"], "video_id": video_id,
+                    "stream_channel": info.get("channel_id") or None,
+                    "currency": "JEWEL", "at": datetime.now(timezone.utc),
+                },
+            },
+            upsert=True,
+        )
+        if res.upserted_id is not None:  # chỉ báo lần đầu, các lần combo sau chỉ cập nhật
+            new.append(gid)
+    if not new:
+        return
+    await ensure_channel(au)
+    log.info("Quà %s Ngọc từ %s (%d server)", jewels, au["displayName"], len(new))
+    d = {"amountDisplayString": f"{jewels:,} Ngọc", "userComment": note, "currency": "JEWEL"}
+    for gid in new:
+        await announce(gid, au, d, vnd, info)
 
 
 async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = None):
@@ -391,7 +377,6 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
         except YTError as e:
             if e.reason in ("liveChatEnded", "liveChatNotFound"):
                 log.info("Live %s đã kết thúc", video_id)
-                await announce_live_end(video_id, info, set(subs.get(video_id, ())))
                 return
             if e.reason in ("quotaExceeded", "rateLimitExceeded"):
                 log.error("Hết quota YouTube, chờ 10 phút")
@@ -648,7 +633,9 @@ async def fix_zero_donations():
 # ---------- Discord ----------
 class Bot(discord.Client):
     def __init__(self):
-        super().__init__(intents=discord.Intents.default())
+        intents = discord.Intents.default()
+        intents.members = MEMBERS_INTENT
+        super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
@@ -704,14 +691,258 @@ async def link_cmd(inter: discord.Interaction):
     await db.link_codes.insert_one({
         "_id": code,
         "discord_id": inter.user.id,
-        "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
+        "expires": datetime.now(timezone.utc) + timedelta(minutes=30),
     })
     await inter.response.send_message(
-        f"Mã của bạn: **{code}** (hết hạn sau 10 phút).\n"
-        "Hãy gõ đúng mã này vào **live chat YouTube** bằng kênh bạn dùng để donate, "
-        "khi live đó đang được bot theo dõi (tự động hoặc bằng `/watch`). "
+        f"Mã của bạn: **{code}** (hết hạn sau 30 phút). Không cần đăng nhập hay cấp quyền gì.\n"
+        "**Cách 1 (khi kênh đang live):** gõ đúng mã này vào live chat YouTube bằng kênh bạn dùng để donate.\n"
+        "**Cách 2 (bất cứ lúc nào):** dán mã vào phần *Giới thiệu* của kênh YouTube, lưu lại, "
+        "rồi gõ `/xacminh` kèm link hoặc @handle kênh của bạn. Xong có thể xoá mã đi.\n"
         "Liên kết dùng chung cho mọi server.",
         ephemeral=True,
+    )
+
+
+@bot.tree.command(name="xacminh", description="Xác minh kênh YouTube bằng mã trong phần Giới thiệu kênh (không cần live)")
+@app_commands.describe(kenh="Link kênh, @handle hoặc ID kênh YouTube của bạn")
+@app_commands.checks.cooldown(1, 20.0)
+async def xacminh_cmd(inter: discord.Interaction, kenh: str):
+    await inter.response.defer(ephemeral=True)
+    now = datetime.now(timezone.utc)
+    codes = [c["_id"] async for c in db.link_codes.find({"discord_id": inter.user.id, "expires": {"$gt": now}})]
+    if not codes:
+        await inter.followup.send("Bạn chưa có mã còn hạn. Gõ `/link` để lấy mã, dán vào phần Giới thiệu kênh rồi thử lại.")
+        return
+    try:
+        au = await resolve_youtube(kenh)
+        if not au:
+            await inter.followup.send("Không tìm thấy kênh YouTube này.")
+            return
+        data = await yt_get("channels", part="snippet", id=au["channelId"])
+    except YTError as e:
+        await inter.followup.send(f"Lỗi YouTube: {e}")
+        return
+    desc = ((data.get("items") or [{}])[0].get("snippet", {}).get("description") or "").upper()
+    code = next((c for c in codes if c in desc), None)
+    if not code:
+        await inter.followup.send(
+            f"Chưa thấy mã trong phần Giới thiệu của kênh **{au['displayName']}**. "
+            "Dán mã vào mục Giới thiệu, lưu lại, đợi 1-2 phút rồi gõ lại lệnh."
+        )
+        return
+    cid = au["channelId"]
+    await db.link_codes.delete_one({"_id": code})
+    await db.links.update_one({"_id": cid}, {"$set": {"discord_id": inter.user.id}}, upsert=True)
+    await migrate_discord_only(inter.user.id, cid)
+    await ensure_channel(au)
+    log.info("Xác minh bằng mô tả kênh: %s ↔ Discord %s", cid, inter.user.id)
+    await inter.followup.send(
+        f"✅ Đã liên kết với kênh **{au['displayName']}**. Bạn có thể xoá mã khỏi phần Giới thiệu."
+    )
+
+
+# ---------- Xác minh thủ công (admin): danh sách chưa liên kết / đã xác minh ----------
+MEMBERS_HELP = (
+    "Tính năng này cần **Server Members Intent**: bật trong Discord Developer Portal (mục Bot), "
+    "rồi thêm biến `MEMBERS_INTENT=1` trên Render và deploy lại."
+)
+NO_PING = discord.AllowedMentions.none()
+
+
+async def unlinked_members(guild: discord.Guild, query: str = "") -> list[int]:
+    linked = {d["discord_id"] async for d in db.links.find({}, {"discord_id": 1})}
+    q = query.strip().lower()
+    out = [
+        m for m in guild.members
+        if not m.bot and m.id not in linked
+        and (not q or q in m.display_name.lower() or q in m.name.lower())
+    ]
+    out.sort(key=lambda m: m.display_name.lower())
+    return [m.id for m in out]
+
+
+class LinkModal(discord.ui.Modal, title="Liên kết YouTube"):
+    kenh = discord.ui.TextInput(label="Kênh YouTube (@handle, link hoặc ID)", placeholder="@tenkenh", max_length=200)
+
+    def __init__(self, owner: "UnlinkedView"):
+        super().__init__()
+        self.owner = owner
+
+    async def on_submit(self, inter: discord.Interaction):
+        await self.owner.apply_link(inter, str(self.kenh))
+
+
+class UnlinkedView(discord.ui.View):
+    """Hiện từng thành viên chưa liên kết. Người đã xác minh sẽ biến mất khỏi danh sách."""
+
+    def __init__(self, guild: discord.Guild, ids: list[int], owner_id: int):
+        super().__init__(timeout=900)
+        self.guild, self.ids, self.owner_id, self.i = guild, ids, owner_id, 0
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.owner_id:
+            await inter.response.send_message("Bảng này của người đã gõ lệnh.", ephemeral=True)
+            return False
+        return True
+
+    def embed(self) -> discord.Embed:
+        if not self.ids:
+            return discord.Embed(description="🎉 Không còn ai chưa liên kết trong danh sách.", color=discord.Color.green())
+        uid = self.ids[self.i]
+        e = discord.Embed(
+            color=discord.Color.orange(),
+            description=(
+                f"<@{uid}> : **chưa liên kết**\nID: `{uid}`\n\n"
+                "Bấm vào tên để xem profile, mục **Kết Nối** có YouTube không. "
+                "Nếu có, bấm **Liên kết** rồi nhập @handle."
+            ),
+        )
+        m = self.guild.get_member(uid)
+        if m:
+            e.set_author(name=m.display_name, icon_url=m.display_avatar.url)
+            e.set_thumbnail(url=m.display_avatar.url)
+        e.set_footer(text=f"{self.i + 1}/{len(self.ids)} người chưa liên kết")
+        return e
+
+    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if self.ids:
+            self.i = (self.i - 1) % len(self.ids)
+        await inter.response.edit_message(content=None, embed=self.embed(), view=self)
+
+    @discord.ui.button(label="🔗 Liên kết", style=discord.ButtonStyle.success)
+    async def link_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if not self.ids:
+            await inter.response.defer()
+            return
+        await inter.response.send_modal(LinkModal(self))
+
+    @discord.ui.button(label="Bỏ qua ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        if self.ids:
+            self.i = (self.i + 1) % len(self.ids)
+        await inter.response.edit_message(content=None, embed=self.embed(), view=self)
+
+    async def apply_link(self, inter: discord.Interaction, text: str):
+        await inter.response.defer()
+        if not self.ids:
+            return
+        uid = self.ids[self.i]
+        try:
+            au = await resolve_youtube(text)
+        except YTError as e:
+            await inter.followup.send(f"Lỗi YouTube: {e}", ephemeral=True)
+            return
+        if not au:
+            await inter.followup.send("Không tìm thấy kênh YouTube này.", ephemeral=True)
+            return
+        cid = au["channelId"]
+        old = await db.links.find_one({"_id": cid})
+        if old and old["discord_id"] != uid:
+            await inter.followup.send(
+                f"Kênh này đang liên kết với <@{old['discord_id']}>. Dùng `/huylienket` để huỷ liên kết cũ trước.",
+                ephemeral=True, allowed_mentions=NO_PING,
+            )
+            return
+        await db.links.update_one(
+            {"_id": cid},
+            {"$set": {"discord_id": uid, "verified_by": inter.user.id, "guild_id": self.guild.id,
+                      "verified_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        await migrate_discord_only(uid, cid)
+        await ensure_channel(au)
+        info = await db.channels.find_one({"_id": cid}) or {}
+        self.ids.pop(self.i)
+        if self.i >= len(self.ids):
+            self.i = 0
+        await inter.edit_original_response(
+            content=f"✅ <@{uid}> ↔ {info.get('handle') or au['displayName']}",
+            embed=self.embed(), view=self, allowed_mentions=NO_PING,
+        )
+
+
+class VerifiedView(discord.ui.View):
+    PER = 10
+
+    def __init__(self, rows: list[tuple], owner_id: int):
+        super().__init__(timeout=900)
+        self.rows, self.owner_id, self.page = rows, owner_id, 0
+        self.pages = max(1, -(-len(rows) // self.PER))
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.owner_id:
+            await inter.response.send_message("Bảng này của người đã gõ lệnh.", ephemeral=True)
+            return False
+        return True
+
+    def embed(self) -> discord.Embed:
+        chunk = self.rows[self.page * self.PER:(self.page + 1) * self.PER]
+        lines = [
+            f"{self.page * self.PER + n}. <@{uid}> ↔ [{handle}](https://www.youtube.com/channel/{cid})"
+            for n, (uid, cid, handle) in enumerate(chunk, 1)
+        ]
+        e = discord.Embed(title="✅ Đã xác minh liên kết", description="\n".join(lines) or "Chưa có ai.",
+                          color=discord.Color.green())
+        e.set_footer(text=f"Trang {self.page + 1}/{self.pages} • {len(self.rows)} người")
+        return e
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        self.page = (self.page - 1) % self.pages
+        await inter.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        self.page = (self.page + 1) % self.pages
+        await inter.response.edit_message(embed=self.embed(), view=self)
+
+
+@bot.tree.command(name="danhsachlienket", description="Xem từng thành viên chưa liên kết YouTube và xác minh thủ công (admin)")
+@app_commands.describe(tim="Lọc theo tên (tuỳ chọn)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def dslk_cmd(inter: discord.Interaction, tim: str = ""):
+    if not MEMBERS_INTENT:
+        await inter.response.send_message(MEMBERS_HELP, ephemeral=True)
+        return
+    await inter.response.defer(ephemeral=True)
+    if not inter.guild.chunked:
+        await inter.guild.chunk()
+    view = UnlinkedView(inter.guild, await unlinked_members(inter.guild, tim), inter.user.id)
+    await inter.followup.send(embed=view.embed(), view=view, allowed_mentions=NO_PING)
+
+
+@bot.tree.command(name="bangxacminh", description="Bảng những thành viên đã liên kết YouTube trong server này (admin)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def bangxacminh_cmd(inter: discord.Interaction):
+    if not MEMBERS_INTENT:
+        await inter.response.send_message(MEMBERS_HELP, ephemeral=True)
+        return
+    await inter.response.defer(ephemeral=True)
+    if not inter.guild.chunked:
+        await inter.guild.chunk()
+    rows = []
+    async for lk in db.links.find():
+        m = inter.guild.get_member(lk["discord_id"])
+        if not m:
+            continue
+        ch = await db.channels.find_one({"_id": lk["_id"]}) or {}
+        rows.append((m.display_name.lower(), lk["discord_id"], lk["_id"], ch.get("handle") or ch.get("name") or lk["_id"]))
+    rows.sort()
+    view = VerifiedView([r[1:] for r in rows], inter.user.id)
+    await inter.followup.send(embed=view.embed(), view=view, allowed_mentions=NO_PING)
+
+
+@bot.tree.command(name="huylienket", description="Huỷ liên kết YouTube của một thành viên (admin)")
+@app_commands.describe(nguoi_dung="Thành viên cần huỷ liên kết")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def huylienket_cmd(inter: discord.Interaction, nguoi_dung: discord.Member):
+    r = await db.links.delete_many({"discord_id": nguoi_dung.id})
+    await inter.response.send_message(
+        f"Đã huỷ {r.deleted_count} liên kết của {nguoi_dung.mention}.", ephemeral=True, allowed_mentions=NO_PING
     )
 
 
@@ -741,16 +972,7 @@ async def top_cmd(
     await inter.response.defer()
     rows = await db.donations.aggregate([
         {"$match": {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}},
-        {"$group": {
-            "_id": "$channel_id",
-            "money": {"$sum": {"$ifNull": ["$vnd", 0]}},
-            "creator_vnd": {"$sum": {"$ifNull": ["$creator_vnd", {"$multiply": [{"$ifNull": ["$vnd", 0]}, 0.7]}]}},
-            "jewels": {"$sum": {"$ifNull": ["$jewels", 0]}},
-            "ruby": {"$sum": {"$ifNull": ["$ruby", 0]}},
-            "ruby_vnd": {"$sum": {"$ifNull": ["$ruby_vnd", 0]}},
-            "count": {"$sum": 1},
-        }},
-        {"$addFields": {"total": {"$add": ["$creator_vnd", "$ruby_vnd"]}}},
+        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
         {"$sort": {"total": -1}},
         {"$limit": limit},
     ]).to_list(limit)
@@ -775,78 +997,13 @@ async def top_cmd(
             info = await db.channels.find_one({"_id": cid}) or {}
             link = await db.links.find_one({"_id": cid})
             label = info.get("handle") or info.get("name") or cid
-        line = (f"💵 **{row['money']:,}₫** + 💎 **{row['jewels']:,} Jewels**\n"
-                f"🔴 {row['ruby']:,} Ruby (~{row['ruby_vnd']:,}₫) • {row['count']} lượt\n"
-                f"Chủ kênh ước tính: **{row['total']:,}₫**")
+        line = f"**{row['total']:,}₫** • {row['count']} lượt"
         if link:
             line = f"<@{link['discord_id']}> (ID: `{link['discord_id']}`)\n" + line
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
         embeds.append(e)
     await inter.followup.send(content=f"🏆 **Top donate • {sname}**", embeds=embeds)
-
-
-@bot.tree.command(name="thongkedonate", description="Thống kê donate theo ngày hoặc tháng")
-@app_commands.describe(ky="Chọn thống kê ngày hoặc tháng", kenh="Kênh YouTube cần thống kê")
-@app_commands.choices(ky=[
-    app_commands.Choice(name="Hôm nay", value="day"),
-    app_commands.Choice(name="Tháng này", value="month"),
-])
-@app_commands.guild_only()
-async def thongkedonate_cmd(
-    inter: discord.Interaction,
-    ky: app_commands.Choice[str],
-    kenh: str | None = None,
-):
-    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
-    if err:
-        await inter.response.send_message(err, ephemeral=True)
-        return
-    sid, sname = sc
-    now = datetime.now(timezone(timedelta(hours=7)))
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    label = "hôm nay"
-    if ky.value == "month":
-        start = start.replace(day=1)
-        label = "tháng này"
-    await inter.response.defer()
-    rows = await db.donations.aggregate([
-        {"$match": {
-            "guild_id": inter.guild_id,
-            "stream_channel": None if sid == UNASSIGNED else sid,
-            "at": {"$gte": start.astimezone(timezone.utc)},
-        }},
-        {"$group": {
-            "_id": "$channel_id",
-            "money": {"$sum": {"$ifNull": ["$vnd", 0]}},
-            "jewels": {"$sum": {"$ifNull": ["$jewels", 0]}},
-            "ruby": {"$sum": {"$ifNull": ["$ruby", 0]}},
-            "ruby_vnd": {"$sum": {"$ifNull": ["$ruby_vnd", 0]}},
-            "count": {"$sum": 1},
-        }},
-        {"$addFields": {"total": {"$add": ["$money", "$ruby_vnd"]}}},
-        {"$sort": {"total": -1}},
-        {"$limit": 10},
-    ]).to_list(10)
-    if not rows:
-        await inter.followup.send(f"Chưa có donate {label} ở kênh **{sname}**.")
-        return
-    lines = []
-    for i, row in enumerate(rows, 1):
-        cid = row["_id"]
-        info = await db.channels.find_one({"_id": cid}) or {}
-        name = info.get("handle") or info.get("name") or cid
-        lines.append(
-            f"**{i}. {name}** — {row['money']:,}₫ + {row['jewels']:,} 💎 "
-            f"({row['ruby']:,} Ruby; chủ kênh ~{row['total']:,}₫)"
-        )
-    e = discord.Embed(
-        title=f"📊 Donate {label} • {sname}",
-        description="\n".join(lines),
-        color=discord.Color.blurple(),
-    )
-    e.set_footer(text="Top xếp theo doanh thu chủ kênh ước tính: Supers ~70% + Gifts 0,01 USD/Ruby. Chưa trừ thuế/phí áp dụng.")
-    await inter.followup.send(embed=e)
 
 
 @bot.tree.command(name="watch", description="Theo dõi thủ công một live stream (admin)")
