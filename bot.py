@@ -1613,6 +1613,38 @@ async def bangxacminh_cmd(inter: discord.Interaction):
     await inter.followup.send(embed=view.embed(), view=view, allowed_mentions=NO_PING)
 
 
+@bot.tree.command(name="timlienket", description="Kiểm tra thành viên đã liên kết YouTube hay chưa (admin)")
+@app_commands.describe(nguoi_dung="Thành viên cần tra cứu")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def timlienket_cmd(inter: discord.Interaction, nguoi_dung: discord.Member):
+    await inter.response.defer(ephemeral=True)
+    links = await db.links.find({"discord_id": nguoi_dung.id}).to_list(length=25)
+    if not links:
+        await inter.followup.send(
+            f"ℹ️ {nguoi_dung.mention} chưa có liên kết YouTube trong dữ liệu bot.",
+            ephemeral=True, allowed_mentions=NO_PING,
+        )
+        return
+
+    lines = []
+    for link in links:
+        cid = link.get("_id")
+        info = await db.channels.find_one({"_id": cid}) or {}
+        name = info.get("name") or "Kênh YouTube"
+        handle = info.get("handle")
+        label = f"{name} ({handle})" if handle else name
+        lines.append(f"• **{label}**\n  Channel ID: `{cid}`\n  https://www.youtube.com/channel/{cid}")
+
+    embed = discord.Embed(
+        title="🔎 Kết quả tra cứu liên kết",
+        description=f"Thành viên: {nguoi_dung.mention}\nDiscord ID: `{nguoi_dung.id}`\n\n" + "\n".join(lines),
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text=f"Tìm thấy {len(links)} liên kết • Chỉ hiển thị với người thực hiện lệnh")
+    await inter.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PING)
+
+
 @bot.tree.command(name="huylienket", description="Huỷ liên kết YouTube của một thành viên (admin)")
 @app_commands.describe(nguoi_dung="Thành viên cần huỷ liên kết")
 @app_commands.default_permissions(manage_guild=True)
