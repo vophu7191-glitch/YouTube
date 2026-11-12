@@ -70,10 +70,9 @@ ended: set[str] = set()  # video đã live xong, không kiểm tra lại
 
 
 def make_top_donate_gif(streamer: str, entries: list[dict]) -> io.BytesIO | None:
-    """Vẽ toàn bộ bảng Top Donate thành một GIF: pixel ghép bảng rồi dừng."""
+    """Tạo GIF kiểu swarm cursors: nhiều con trỏ quét và chọn các vùng trên bảng rồi dừng."""
     try:
         from PIL import Image, ImageDraw, ImageFont
-        import math
 
         width, row_height, header_height = 760, 76, 112
         height = header_height + row_height * len(entries) + 24
@@ -130,32 +129,76 @@ def make_top_donate_gif(streamer: str, entries: list[dict]) -> io.BytesIO | None
             draw.text((width - 42 - amount_width, y + 25), amount_text,
                       font=amount_font, fill=(255, 205, 110))
 
-        # Chia ảnh hoàn chỉnh thành các ô vuông; các ô lần lượt xuất hiện như pixel ghép hình.
-        tile = 12
-        tiles = [(x, y) for y in range(0, height, tile) for x in range(0, width, tile)]
-        rng = random.Random(2026)
-        rng.shuffle(tiles)
-        frames = []
-        frame_count = 12
-        for step in range(frame_count):
-            frame = Image.new("RGB", (width, height), background)
-            visible = math.ceil(len(tiles) * (step + 1) / frame_count)
-            for x, y in tiles[:visible]:
-                frame.paste(board.crop((x, y, min(x + tile, width), min(y + tile, height))), (x, y))
-            frames.append(frame)
-        frames.append(board.copy())
+        targets = [(28, 18, width - 28, 96)]
+        for index in range(len(entries)):
+            y = header_height + index * row_height
+            targets.extend([
+                (34, y + 5, 158, y + row_height - 10),
+                (164, y + 5, 470, y + row_height - 10),
+                (475, y + 5, width - 34, y + row_height - 10),
+            ])
 
+        colors = [
+            (255, 92, 112), (45, 205, 180), (105, 145, 255),
+            (255, 190, 65), (190, 115, 255), (80, 210, 255),
+        ]
+        paths = [
+            [(-18, 18), (width * .20, 45), (width * .42, 70), (width * .72, 45)],
+            [(width + 18, 35), (width * .78, 90), (width * .58, 150), (width * .35, 210)],
+            [(width * .50, -18), (width * .48, 100), (width * .20, 220), (width * .82, 330)],
+            [(-18, height * .72), (width * .25, height * .60), (width * .62, height * .48), (width + 18, height * .35)],
+            [(width + 18, height * .82), (width * .75, height * .72), (width * .38, height * .60), (-18, height * .48)],
+            [(width * .15, height + 18), (width * .42, height * .78), (width * .68, height * .55), (width * .88, height * .28)],
+        ]
+
+        def cursor_position(path, progress):
+            scaled = progress * (len(path) - 1)
+            segment = min(int(scaled), len(path) - 2)
+            part = scaled - segment
+            ax, ay = path[segment]
+            bx, by = path[segment + 1]
+            return (ax + (bx - ax) * part, ay + (by - ay) * part)
+
+        frames = []
+        frame_count = 30
+        for frame_index in range(frame_count):
+            frame = board.copy()
+            overlay = ImageDraw.Draw(frame)
+            progress = frame_index / (frame_count - 1)
+            selected_count = min(len(targets), int(progress * (len(targets) + 2)))
+            for target_index, (x1, y1, x2, y2) in enumerate(targets[:selected_count]):
+                color = colors[target_index % len(colors)]
+                overlay.rounded_rectangle((x1, y1, x2, y2), radius=7, outline=color, width=2)
+                corner = 9
+                for x, y, sx, sy in ((x1, y1, 1, 1), (x2, y1, -1, 1),
+                                     (x1, y2, 1, -1), (x2, y2, -1, -1)):
+                    overlay.line((x, y, x + sx * corner, y), fill=color, width=3)
+                    overlay.line((x, y, x, y + sy * corner), fill=color, width=3)
+
+            for agent_index, path in enumerate(paths):
+                agent_progress = (progress * 1.35 + agent_index * .19) % 1.0
+                cx, cy = cursor_position(path, agent_progress)
+                color = colors[agent_index]
+                px, py = int(cx), int(cy)
+                overlay.polygon(
+                    [(px, py), (px + 4, py + 17), (px + 8, py + 11), (px + 15, py + 10)],
+                    fill=color, outline=(245, 248, 255),
+                )
+                overlay.ellipse((px + 10, py + 8, px + 17, py + 15), fill=color)
+
+            frames.append(frame)
+
+        frames.append(board.copy())
         output = io.BytesIO()
         frames[0].save(
             output, format="GIF", save_all=True, append_images=frames[1:],
-            duration=[85] * frame_count + [3000], disposal=2, optimize=True,
+            duration=[90] * frame_count + [3000], disposal=2, optimize=True,
         )
         output.seek(0)
         return output
     except Exception:
         log.exception("Không tạo được ảnh GIF bảng Top Donate")
         return None
-
 
 async def fetch_top_avatar(url: str | None):
     if not url or not session or session.closed:
@@ -547,8 +590,7 @@ async def handle_message(item: dict, video_id: str, info: dict):
 
 
 async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
-    """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""
-    au = item["authorDetails"]
+    """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""    au = item["authorDetails"]
     sn = item["snippet"]
     # YouTube Data API v3 trả quà Ngọc ở snippet.giftDetails.
     # Giữ fallback cấu trúc cũ để không làm hỏng dữ liệu từ nguồn khác.
@@ -1097,8 +1139,7 @@ async def publish_verified_member(guild_id: int | None, discord_id: int, au: dic
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_author(name=display_name, icon_url=avatar)
-    try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    try:        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         log.exception("Không đăng được thành viên đã xác minh vào kênh %s", channel_id)
 
@@ -1646,7 +1687,6 @@ async def review_draw(guild: discord.Guild) -> dict:
         res["done"] = len(reviewed)
         res["total"] = len(reviewed) + len(candidates)
         return res
-
 
 async def review_mark_unlinked(gid: int, uid: int, cycle: int, by: int, reason: str) -> bool:
     """Đánh dấu 'chưa liên kết' kèm lý do. False nếu người này không còn ở trạng thái chờ (đã có người khác xử lý)."""
@@ -2197,8 +2237,7 @@ async def top_cmd(
         entries.append({
             "name": label,
             "total": int(row["total"]),
-            "count": int(row["count"]),
-            "avatar": avatar,
+            "count": int(row["count"]),            "avatar": avatar,
         })
 
     image_gif = await asyncio.to_thread(make_top_donate_gif, sname, entries)
