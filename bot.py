@@ -148,7 +148,7 @@ def make_top_donate_gif(streamer: str, entries: list[dict]) -> io.BytesIO | None
         output = io.BytesIO()
         frames[0].save(
             output, format="GIF", save_all=True, append_images=frames[1:],
-            duration=[85] * frame_count + [3000], loop=1, disposal=2, optimize=True,
+            duration=[85] * frame_count + [3000], disposal=2, optimize=True,
         )
         output.seek(0)
         return output
