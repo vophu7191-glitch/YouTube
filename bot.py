@@ -1048,7 +1048,7 @@ async def complete_youtube_link(discord_id: int, code: str, au: dict) -> tuple[b
         challenge_filter["channel_id"] = cid
     consumed = await db.link_codes.find_one_and_delete(challenge_filter)
     if not consumed:
-        return False, "Mã vừa được sử dụng hoặc đã hết hạn. Hãy tạo mã mới bằng lệnh /link."
+        return False, "Mã vừa được sử dụng hoặc đã hết hạn. Hãy tạo mã mới bằng lệnh /liên-kết-youtube."
 
     try:
         await db.links.update_one(
@@ -1413,7 +1413,7 @@ async def xacminh_cmd(inter: discord.Interaction, kenh: str):
         ]
         if not codes:
             await inter.followup.send(
-                "Bạn chưa có mã phù hợp hoặc mã đã hết hạn. Gửi link kênh vào server hoặc gõ /link để lấy mã mới."
+                "Bạn chưa có mã phù hợp hoặc mã đã hết hạn. Gửi link kênh vào server hoặc gõ /liên-kết-youtube để lấy mã mới."
             )
             return
         success, result = await complete_youtube_link(inter.user.id, codes[0], au)
@@ -1924,7 +1924,7 @@ async def unlink_cmd(inter: discord.Interaction):
     await inter.response.send_message(f"Đã huỷ {r.deleted_count} liên kết.", ephemeral=True)
 
 
-# ---------- Bảng xếp hạng vĩnh viễn (cộng dồn từ trước đến nay, không reset theo tháng/năm) ----------
+# ---------- Bảng xếp hạng donate (cộng dồn các khoản đã ghi nhận) ----------
 RANK_PER = 10  # số người mỗi trang ở danh sách đầy đủ
 
 
@@ -2007,7 +2007,7 @@ class RankingView(discord.ui.View):
 
 
 class TopMoreView(discord.ui.View):
-    """Nút dưới /top: mở danh sách đầy đủ (chỉ người bấm thấy) để xem những người sau top 10."""
+    """Nút dưới /top-donate: mở danh sách đầy đủ (chỉ người bấm thấy) để xem những người sau top 10."""
 
     def __init__(self, gid: int, sid: str, sname: str, donors: int, total: int, first_page: int):
         super().__init__(timeout=900)
@@ -2215,7 +2215,7 @@ async def themdonate_cmd(
     })
     await inter.followup.send(
         f"Đã thêm {so_tien:,.0f} {cur} (~{vnd:,}₫) vào kênh **{sc[1]}**. "
-        f"Mã: `{did}` (nhập sai thì dùng `/xoadonate`)."
+        f"Mã: `{did}` (nhập sai thì dùng `/xóa-donate`)."
     )
 
 
@@ -2316,7 +2316,7 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
         except ValueError as e:
             errors.append(f"Dòng {n}: {e}")
 
-    msg = f"Đã nhập **{ok}/{len(rows)}** dòng. Mã lô: `{batch}` (dùng `/xoadonate` với mã này để huỷ cả lô)."
+    msg = f"Đã nhập **{ok}/{len(rows)}** dòng. Mã lô: `{batch}` (dùng `/xóa-donate` với mã này để huỷ cả lô)."
     if errors:
         msg += "\nLỗi:\n" + "\n".join(errors[:10])
         if len(errors) > 10:
@@ -2464,7 +2464,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
 @gankenh_cmd.autocomplete("kenh")
 async def streamer_autocomplete(inter: discord.Interaction, current: str):
     items = await list_streamers(inter.guild_id)
-    if not inter.command or inter.command.name != "top-donate":  # chỉ /top được xem mục "Chưa phân kênh"
+    if not inter.command or inter.command.name != "top-donate":  # chỉ /top-donate được xem mục "Chưa phân kênh"
         items = [x for x in items if x[0] != UNASSIGNED]
     cur = current.strip().lower()
     return [
