@@ -691,6 +691,57 @@ YOUTUBE_CHANNEL_LINK_RE = re.compile(
 )
 
 
+async def publish_verified_member(guild_id: int | None, discord_id: int, au: dict):
+    if not guild_id:
+        return
+    channel_id = (await guild_cfg(guild_id)).get("youtube_verified_channel")
+    if not channel_id:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.HTTPException:
+            log.warning("Không tìm thấy kênh danh sách xác minh %s", channel_id)
+            return
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    guild = bot.get_guild(guild_id)
+    member = guild.get_member(discord_id) if guild else None
+    if guild and member is None:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.HTTPException:
+            member = None
+    if member is None:
+        try:
+            member = await bot.fetch_user(discord_id)
+        except discord.HTTPException:
+            log.warning("Không lấy được thông tin Discord %s để đăng danh sách xác minh", discord_id)
+            return
+
+    avatar = member.display_avatar.url
+    display_name = getattr(member, "display_name", None) or member.name
+    youtube_url = f"https://www.youtube.com/channel/{au['channelId']}"
+    embed = discord.Embed(
+        title="✅ Thành viên đã xác minh YouTube",
+        description=(
+            f"**Discord:** <@{discord_id}>\n"
+            f"**YouTube:** [{au['displayName']}]({youtube_url})\n"
+            "**Trạng thái:** Đã xác minh"
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=display_name, icon_url=avatar)
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        log.exception("Không đăng được thành viên đã xác minh vào kênh %s", channel_id)
+
+
 async def complete_youtube_link(discord_id: int, code: str, au: dict) -> tuple[bool, str]:
     """Xác minh mã trong mô tả đúng Channel ID rồi lưu liên kết Discord ↔ YouTube."""
     now = datetime.now(timezone.utc)
@@ -755,6 +806,7 @@ async def complete_youtube_link(discord_id: int, code: str, au: dict) -> tuple[b
 
     await migrate_discord_only(discord_id, cid)
     await ensure_channel(au)
+    await publish_verified_member(challenge.get("guild_id"), discord_id, au)
     log.info("Xác minh bằng mã mô tả: %s ↔ Discord %s", cid, discord_id)
     return True, (
         f"✅ Đã xác minh và ghi nhận kênh {au['displayName']}. "
@@ -762,12 +814,43 @@ async def complete_youtube_link(discord_id: int, code: str, au: dict) -> tuple[b
     )
 
 
+async def safe_delete_message(message: discord.Message | None):
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+
+def schedule_message_delete(message: discord.Message | None, delay: int):
+    if message is None:
+        return None
+
+    async def delete_later():
+        await asyncio.sleep(delay)
+        await safe_delete_message(message)
+
+    task = asyncio.create_task(delete_later())
+    message_delete_tasks.add(task)
+    task.add_done_callback(message_delete_tasks.discard)
+    return task
+
+
 class YouTubeVerifyView(discord.ui.View):
-    def __init__(self, code: str, owner_id: int, au: dict):
+    def __init__(
+        self,
+        code: str,
+        owner_id: int,
+        au: dict,
+        source_message: discord.Message | None = None,
+    ):
         super().__init__(timeout=600)
         self.code = code
         self.owner_id = owner_id
         self.au = au
+        self.source_message = source_message
+        self.source_delete_task = None
         self.processing = False
 
     @discord.ui.button(label="Tôi đã cập nhật mô tả", style=discord.ButtonStyle.success)
@@ -799,14 +882,23 @@ class YouTubeVerifyView(discord.ui.View):
             success, message = False, "Có lỗi khi xác minh. Vui lòng thử lại sau."
             log.exception("Unexpected YouTube verification error")
 
-        if not success:
+        if success:
+            if self.source_delete_task and not self.source_delete_task.done():
+                self.source_delete_task.cancel()
+            await safe_delete_message(self.source_message)
+            await safe_delete_message(interaction.message)
+        else:
             self.processing = False
             button.disabled = False
+            if self.source_message and not self.source_delete_task:
+                self.source_delete_task = schedule_message_delete(self.source_message, 60)
+
         await interaction.followup.send(message, ephemeral=True)
-        try:
-            await interaction.message.edit(view=self)
-        except discord.HTTPException:
-            pass
+        if not success:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 link_message_cooldowns: dict[tuple[int, int], float] = {}
@@ -868,24 +960,14 @@ async def on_message(message: discord.Message):
             "channel_id": cid,
             "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
         })
+        view = YouTubeVerifyView(code, message.author.id, au, source_message=message)
         await message.channel.send(
-            f"{message.author.mention}, để xác minh kênh {au['displayName']}:\\n"
-            f"1. Thêm mã **{code}** vào phần Giới thiệu của đúng kênh YouTube.\\n"
-            "2. Lưu thay đổi trên YouTube.\\n"
+            f"{message.author.mention}, để xác minh kênh {au['displayName']}:\n"
+            f"1. Thêm mã **{code}** vào phần Giới thiệu của đúng kênh YouTube.\n"
+            "2. Lưu thay đổi trên YouTube.\n"
             "3. Quay lại đây và bấm nút bên dưới. Mã chỉ dùng một lần và hết hạn sau 10 phút.",
-            view=YouTubeVerifyView(code, message.author.id, au),
+            view=view,
         )
-
-        async def delete_source_message():
-            await asyncio.sleep(300)
-            try:
-                await message.delete()
-            except discord.HTTPException:
-                pass
-
-        task = asyncio.create_task(delete_source_message())
-        message_delete_tasks.add(task)
-        task.add_done_callback(message_delete_tasks.discard)
     finally:
         link_message_pending.discard(key)
 
@@ -915,6 +997,49 @@ async def setkenhnhanlink_cmd(inter: discord.Interaction, kenh: discord.TextChan
         f"Đã đặt {kenh.mention} làm kênh duy nhất để Jion tự nhận diện link YouTube trong server này.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="setkenhxacminh", description="Chọn kênh công khai danh sách thành viên đã xác minh YouTube (admin)")
+@app_commands.describe(kenh="Kênh văn bản công khai danh sách xác minh")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def setkenhxacminh_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    me = inter.guild.get_member(bot.user.id) if inter.guild and bot.user else None
+    perms = kenh.permissions_for(me) if me else None
+    if not perms or not perms.view_channel or not perms.send_messages or not perms.embed_links:
+        await inter.response.send_message(
+            "Jion cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
+            ephemeral=True,
+        )
+        return
+    await db.guilds.update_one(
+        {"_id": inter.guild_id},
+        {"$set": {"youtube_verified_channel": kenh.id}},
+        upsert=True,
+    )
+    await inter.response.send_message(
+        f"Đã đặt {kenh.mention} làm kênh công khai danh sách thành viên đã xác minh YouTube.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="xemkenhxacminh", description="Xem kênh công khai danh sách xác minh YouTube")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def xemkenhxacminh_cmd(inter: discord.Interaction):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    cid = (await guild_cfg(inter.guild_id)).get("youtube_verified_channel")
+    channel = inter.guild.get_channel(cid) if cid else None
+    msg = (
+        f"Kênh danh sách xác minh YouTube hiện tại: {channel.mention}."
+        if channel else "Server chưa đặt kênh công khai danh sách xác minh YouTube."
+    )
+    await inter.response.send_message(msg, ephemeral=True)
 
 
 @bot.tree.command(name="xemkenhnhanlink", description="Xem kênh đang nhận diện link YouTube tự động")
