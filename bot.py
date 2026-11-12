@@ -590,7 +590,8 @@ async def handle_message(item: dict, video_id: str, info: dict):
 
 
 async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
-    """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""    au = item["authorDetails"]
+    """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""
+    au = item["authorDetails"]
     sn = item["snippet"]
     # YouTube Data API v3 trả quà Ngọc ở snippet.giftDetails.
     # Giữ fallback cấu trúc cũ để không làm hỏng dữ liệu từ nguồn khác.
