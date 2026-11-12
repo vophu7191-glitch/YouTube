@@ -69,6 +69,50 @@ message_delete_tasks: set[asyncio.Task] = set()
 ended: set[str] = set()  # video đã live xong, không kiểm tra lại
 
 
+def make_particle_gif() -> io.BytesIO | None:
+    """Tạo dải hạt hình học động trong suốt để trang trí bảng Top Donate."""
+    try:
+        from PIL import Image, ImageDraw
+
+        width, height, frame_count = 480, 72, 18
+        palette = [
+            0, 0, 0, 91, 190, 255, 255, 190, 92, 255, 116, 151,
+            167, 139, 250, 101, 220, 180, 255, 225, 120, 190, 205, 220,
+        ]
+        rng = random.Random(2026)
+        particles = [
+            (rng.randrange(width), rng.randrange(height), rng.choice((-2, -1, 1, 2)),
+             rng.choice((-1, 0, 1)), rng.choice((2, 3, 4)),
+             rng.choice(("dot", "triangle", "diamond")), rng.randrange(1, 8))
+            for _ in range(34)
+        ]
+        frames = []
+        for step in range(frame_count):
+            frame = Image.new("P", (width, height), 0)
+            frame.putpalette(palette + [0] * (768 - len(palette)))
+            draw = ImageDraw.Draw(frame)
+            for x0, y0, vx, vy, size, shape, color in particles:
+                x = (x0 + step * vx) % (width + 12) - 6
+                y = (y0 + step * vy) % (height + 10) - 5
+                if shape == "dot":
+                    draw.ellipse((x, y, x + size, y + size), fill=color)
+                elif shape == "triangle":
+                    draw.polygon(((x, y + size), (x + size, y + size), (x + size // 2, y)), fill=color)
+                else:
+                    draw.polygon(((x + size // 2, y), (x + size, y + size // 2),
+                                  (x + size // 2, y + size), (x, y + size // 2)), fill=color)
+            frames.append(frame)
+
+        output = io.BytesIO()
+        frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:],
+                       duration=100, loop=0, transparency=0, disposal=2, optimize=True)
+        output.seek(0)
+        return output
+    except Exception:
+        log.exception("Không tạo được hiệu ứng hạt cho bảng Top Donate")
+        return None
+
+
 # ---------- YouTube ----------
 class YTError(Exception):
     def __init__(self, status, reason, message):
@@ -2102,12 +2146,18 @@ async def top_cmd(
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
         embeds.append(e)
     content = f"🏆 **Top donate • {sname}**\n-# Tổng hợp các khoản donate đã ghi nhận"
+    particle_gif = await asyncio.to_thread(make_particle_gif)
+    send_args = {"content": content, "embeds": embeds}
+    if particle_gif:
+        embeds[0].set_image(url="attachment://top-particles.gif")
+        send_args["file"] = discord.File(particle_gif, filename="top-particles.gif")
+
     donors, total = await rank_summary(gid, sid)
     if donors > limit:  # còn người phía sau -> có nút xem tiếp
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
-        view.message = await inter.followup.send(content=content, embeds=embeds, view=view)
+        view.message = await inter.followup.send(**send_args, view=view)
     else:
-        await inter.followup.send(content=content, embeds=embeds)
+        await inter.followup.send(**send_args)
 
 
 @bot.tree.command(name="theo-dõi-live", description="Theo dõi thủ công một live stream (admin)")
