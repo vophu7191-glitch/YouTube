@@ -69,149 +69,6 @@ message_delete_tasks: set[asyncio.Task] = set()
 ended: set[str] = set()  # video đã live xong, không kiểm tra lại
 
 
-def make_top_donate_gif(streamer: str, entries: list[dict]) -> io.BytesIO | None:
-    """Tạo GIF kiểu swarm cursors: nhiều con trỏ quét và chọn các vùng trên bảng rồi dừng."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-
-        width, row_height, header_height = 760, 76, 112
-        height = header_height + row_height * len(entries) + 24
-        background = (10, 14, 25)
-        board = Image.new("RGB", (width, height), background)
-        draw = ImageDraw.Draw(board)
-        try:
-            title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 31)
-            subtitle_font = ImageFont.truetype("DejaVuSans.ttf", 15)
-            name_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
-            amount_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 19)
-            small_font = ImageFont.truetype("DejaVuSans.ttf", 14)
-        except OSError:
-            title_font = subtitle_font = name_font = amount_font = small_font = ImageFont.load_default()
-
-        draw.rounded_rectangle((12, 12, width - 12, height - 12), radius=22,
-                               fill=(17, 24, 40), outline=(48, 72, 105), width=2)
-        draw.text((34, 25), "TOP DONATE", font=title_font, fill=(185, 225, 255))
-        draw.text((36, 69), streamer[:58], font=subtitle_font, fill=(145, 165, 190))
-        draw.line((30, 98, width - 30, 98), fill=(48, 72, 105), width=2)
-
-        rank_colors = [(255, 205, 105), (205, 215, 230), (220, 150, 105)]
-        for index, entry in enumerate(entries, 1):
-            y = header_height + (index - 1) * row_height
-            if index % 2 == 0:
-                draw.rounded_rectangle((26, y, width - 26, y + row_height - 6),
-                                       radius=12, fill=(22, 32, 51))
-            rank_color = rank_colors[index - 1] if index <= 3 else (135, 165, 205)
-            draw.text((39, y + 23), f"#{index}", font=name_font, fill=rank_color)
-
-            avatar = entry.get("avatar")
-            avatar_x, avatar_y, avatar_size = 100, y + 9, 52
-            if avatar:
-                try:
-                    avatar = avatar.convert("RGB").resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-                    circle = Image.new("L", (avatar_size, avatar_size), 0)
-                    ImageDraw.Draw(circle).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
-                    board.paste(avatar, (avatar_x, avatar_y), circle)
-                except Exception:
-                    draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
-                                 fill=(48, 72, 105))
-            else:
-                draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
-                             fill=(48, 72, 105))
-                draw.text((avatar_x + 17, avatar_y + 15), "?", font=name_font, fill=(205, 220, 240))
-
-            name = str(entry.get("name") or "Unknown")[:42]
-            draw.text((169, y + 13), name, font=name_font, fill=(225, 235, 250))
-            draw.text((169, y + 43), f"{entry.get('count', 0)} lượt donate",
-                      font=small_font, fill=(135, 155, 180))
-            amount_text = f"{int(entry.get('total', 0)):,}₫"
-            amount_box = draw.textbbox((0, 0), amount_text, font=amount_font)
-            amount_width = amount_box[2] - amount_box[0]
-            draw.text((width - 42 - amount_width, y + 25), amount_text,
-                      font=amount_font, fill=(255, 205, 110))
-
-        targets = [(28, 18, width - 28, 96)]
-        for index in range(len(entries)):
-            y = header_height + index * row_height
-            targets.extend([
-                (34, y + 5, 158, y + row_height - 10),
-                (164, y + 5, 470, y + row_height - 10),
-                (475, y + 5, width - 34, y + row_height - 10),
-            ])
-
-        colors = [
-            (255, 92, 112), (45, 205, 180), (105, 145, 255),
-            (255, 190, 65), (190, 115, 255), (80, 210, 255),
-        ]
-        paths = [
-            [(-18, 18), (width * .20, 45), (width * .42, 70), (width * .72, 45)],
-            [(width + 18, 35), (width * .78, 90), (width * .58, 150), (width * .35, 210)],
-            [(width * .50, -18), (width * .48, 100), (width * .20, 220), (width * .82, 330)],
-            [(-18, height * .72), (width * .25, height * .60), (width * .62, height * .48), (width + 18, height * .35)],
-            [(width + 18, height * .82), (width * .75, height * .72), (width * .38, height * .60), (-18, height * .48)],
-            [(width * .15, height + 18), (width * .42, height * .78), (width * .68, height * .55), (width * .88, height * .28)],
-        ]
-
-        def cursor_position(path, progress):
-            scaled = progress * (len(path) - 1)
-            segment = min(int(scaled), len(path) - 2)
-            part = scaled - segment
-            ax, ay = path[segment]
-            bx, by = path[segment + 1]
-            return (ax + (bx - ax) * part, ay + (by - ay) * part)
-
-        frames = []
-        frame_count = 30
-        for frame_index in range(frame_count):
-            frame = board.copy()
-            overlay = ImageDraw.Draw(frame)
-            progress = frame_index / (frame_count - 1)
-            selected_count = min(len(targets), int(progress * (len(targets) + 2)))
-            for target_index, (x1, y1, x2, y2) in enumerate(targets[:selected_count]):
-                color = colors[target_index % len(colors)]
-                overlay.rounded_rectangle((x1, y1, x2, y2), radius=7, outline=color, width=2)
-                corner = 9
-                for x, y, sx, sy in ((x1, y1, 1, 1), (x2, y1, -1, 1),
-                                     (x1, y2, 1, -1), (x2, y2, -1, -1)):
-                    overlay.line((x, y, x + sx * corner, y), fill=color, width=3)
-                    overlay.line((x, y, x, y + sy * corner), fill=color, width=3)
-
-            for agent_index, path in enumerate(paths):
-                agent_progress = (progress * 1.35 + agent_index * .19) % 1.0
-                cx, cy = cursor_position(path, agent_progress)
-                color = colors[agent_index]
-                px, py = int(cx), int(cy)
-                overlay.polygon(
-                    [(px, py), (px + 4, py + 17), (px + 8, py + 11), (px + 15, py + 10)],
-                    fill=color, outline=(245, 248, 255),
-                )
-                overlay.ellipse((px + 10, py + 8, px + 17, py + 15), fill=color)
-
-            frames.append(frame)
-
-        frames.append(board.copy())
-        output = io.BytesIO()
-        frames[0].save(
-            output, format="GIF", save_all=True, append_images=frames[1:],
-            duration=[90] * frame_count + [3000], disposal=2, optimize=True,
-        )
-        output.seek(0)
-        return output
-    except Exception:
-        log.exception("Không tạo được ảnh GIF bảng Top Donate")
-        return None
-
-async def fetch_top_avatar(url: str | None):
-    if not url or not session or session.closed:
-        return None
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
-            if response.status != 200:
-                return None
-            from PIL import Image
-            return await asyncio.to_thread(Image.open, io.BytesIO(await response.read()))
-    except Exception:
-        return None
-
 # ---------- YouTube ----------
 class YTError(Exception):
     def __init__(self, status, reason, message):
@@ -2219,47 +2076,36 @@ async def top_cmd(
         await inter.followup.send(f"Chưa có donate nào ở kênh **{sname}**.")
         return
 
-    entries = []
-    for row in rows:
+    colors = [discord.Color.gold(), discord.Color.light_grey(), discord.Color.orange()]
+    embeds = []
+    for i, row in enumerate(rows, 1):
         cid = row["_id"]
         if cid.startswith("dc:"):
             did = int(cid[3:])
+            link = {"discord_id": did}
             try:
-                user = await bot.fetch_user(did)
-                label = f"@{user.name}"
-                avatar_url = user.display_avatar.url
+                u = await bot.fetch_user(did)
+                info = {"avatar": u.display_avatar.url}
+                label = f"@{u.name}"
             except discord.HTTPException:
-                label, avatar_url = str(did), None
+                info, label = {}, str(did)
         else:
             info = await db.channels.find_one({"_id": cid}) or {}
+            link = await db.links.find_one({"_id": cid})
             label = info.get("handle") or info.get("name") or cid
-            avatar_url = info.get("avatar")
-        avatar = await fetch_top_avatar(avatar_url)
-        entries.append({
-            "name": label,
-            "total": int(row["total"]),
-            "count": int(row["count"]),            "avatar": avatar,
-        })
-
-    image_gif = await asyncio.to_thread(make_top_donate_gif, sname, entries)
-    if not image_gif:
-        await inter.followup.send("Không tạo được ảnh bảng Top Donate. Vui lòng thử lại sau.")
-        return
-
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.set_image(url="attachment://top-donate.gif")
-    send_args = {
-        "embed": embed,
-        "file": discord.File(image_gif, filename="top-donate.gif"),
-        "allowed_mentions": NO_PING,
-    }
-
+        line = f"**{row['total']:,}₫** • {row['count']} lượt"
+        if link:
+            line = f"<@{link['discord_id']}> (ID: `{link['discord_id']}`)\n" + line
+        e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
+        e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
+        embeds.append(e)
+    content = f"🏆 **Top donate • {sname}**\n-# Tổng hợp các khoản donate đã ghi nhận"
     donors, total = await rank_summary(gid, sid)
-    if donors > limit:
+    if donors > limit:  # còn người phía sau -> có nút xem tiếp
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
-        view.message = await inter.followup.send(**send_args, view=view)
+        view.message = await inter.followup.send(content=content, embeds=embeds, view=view)
     else:
-        await inter.followup.send(**send_args)
+        await inter.followup.send(content=content, embeds=embeds)
 
 
 @bot.tree.command(name="theo-dõi-live", description="Theo dõi thủ công một live stream (admin)")
