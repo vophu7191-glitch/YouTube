@@ -502,6 +502,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
     saved = await db.live_sessions.find_one({"_id": video_id}) or {}
     token = saved.get("next_page_token")
     last_success_at = saved.get("last_success_at")
+    quota_interrupted = bool(saved.get("quota_paused") or saved.get("paused_at"))
     await db.live_sessions.update_one(
         {"_id": video_id},
         {"$set": {
@@ -539,7 +540,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
                     {"$set": {"status": "ended", "ended_at": ended_at}},
                     upsert=True,
                 )
-                if saved.get("paused_at") or (last_success_at and saved.get("quota_paused")):
+                if quota_interrupted:
                     await db.recovery_jobs.update_one(
                         {"_id": video_id},
                         {"$setOnInsert": {
@@ -556,6 +557,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
                 reset_at = quota_reset_at()
                 paused_at = datetime.now(timezone.utc)
                 log.error("Quota YouTube đã hết; tạm dừng live %s đến %s", video_id, reset_at.isoformat())
+                quota_interrupted = True
                 await db.live_sessions.update_one(
                     {"_id": video_id},
                     {"$set": {
