@@ -11,6 +11,7 @@ import string
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -36,6 +37,9 @@ HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0"))
 MEMBERS_INTENT = os.getenv("MEMBERS_INTENT", "") == "1"
 PORT = int(os.getenv("PORT", "0"))  # Render Web Service cần; Worker thì bỏ trống
 MESSAGE_CONTENT_INTENT = os.getenv("MESSAGE_CONTENT_INTENT", "") == "1"
+YT_DAILY_QUOTA_LIMIT = max(int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000")), 1)
+YT_QUOTA_RESERVE = max(int(os.getenv("YT_QUOTA_RESERVE", "2000")), 0)
+YT_QUOTA_COSTS = {"liveChat/messages": 5, "videos": 1, "channels": 1, "search": 100}
 
 # Tỷ giá ước lượng về VND để cộng tổng. Hãy chỉnh lại cho đúng ý bạn.
 RATES_VND = {
@@ -72,13 +76,61 @@ class YTError(Exception):
         self.status, self.reason = status, reason
 
 
+def quota_reset_at(now: datetime | None = None) -> datetime:
+    """Mốc reset quota YouTube: 00:00 theo giờ Pacific."""
+    pacific = ZoneInfo("America/Los_Angeles")
+    local_now = (now or datetime.now(timezone.utc)).astimezone(pacific)
+    next_midnight = datetime.combine(
+        local_now.date() + timedelta(days=1), datetime.min.time(), tzinfo=pacific
+    )
+    return next_midnight.astimezone(timezone.utc)
+
+
+async def quota_status() -> dict:
+    """Ước tính quota bot đã dùng trong ngày Pacific; không bao gồm ứng dụng khác dùng chung key."""
+    day = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
+    doc = await db.yt_quota.find_one({"_id": day}) or {}
+    return {
+        "day": day,
+        "used": int(doc.get("used", 0)),
+        "blocked_until": doc.get("blocked_until"),
+    }
+
+
 async def yt_get(path, **params):
+    cost = YT_QUOTA_COSTS.get(path, 1)
+    status = await quota_status()
+    now = datetime.now(timezone.utc)
+    blocked_until = status.get("blocked_until")
+    if blocked_until and blocked_until > now:
+        raise YTError(403, "quotaExceeded", "Quota đang tạm dừng đến lần reset tiếp theo.")
+
+    is_live_chat = path == "liveChat/messages"
+    if status["used"] + cost > YT_DAILY_QUOTA_LIMIT:
+        raise YTError(403, "localQuotaLimit", "Ước tính quota của bot đã chạm giới hạn ngày.")
+    if not is_live_chat and status["used"] + cost > max(
+        YT_DAILY_QUOTA_LIMIT - YT_QUOTA_RESERVE, 0
+    ):
+        raise YTError(403, "localQuotaReserve", "Bot đang giữ quota dự phòng cho Live Chat.")
+
+    # Ghi nhận trước request để không mất bộ đếm nếu Render khởi động lại giữa chừng.
+    await db.yt_quota.update_one(
+        {"_id": status["day"]},
+        {"$inc": {"used": cost}, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
     params["key"] = YT_KEY
     async with session.get(f"https://www.googleapis.com/youtube/v3/{path}", params=params) as r:
         data = await r.json()
         if r.status != 200:
             err = data.get("error", {})
             reason = (err.get("errors") or [{}])[0].get("reason", "")
+            if reason == "quotaExceeded":
+                await db.yt_quota.update_one(
+                    {"_id": status["day"]},
+                    {"$set": {"blocked_until": quota_reset_at(), "blocked_reason": reason}},
+                    upsert=True,
+                )
             raise YTError(r.status, reason, err.get("message", ""))
         return data
 
@@ -437,7 +489,7 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
 
 async def watch_chat(video_id: str, chat_id: str, info: dict):
     log.info("Bắt đầu theo dõi live %s (%s)", video_id, info.get("channel"))
-    if info.get("channel_id"):  # ghi nhớ kênh để chọn trong /top
+    if info.get("channel_id"):
         try:
             await db.streamers.update_one(
                 {"_id": info["channel_id"]},
@@ -446,7 +498,19 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
             )
         except Exception:
             log.exception("Không lưu được thông tin kênh")
-    token = None
+
+    saved = await db.live_sessions.find_one({"_id": video_id}) or {}
+    token = saved.get("next_page_token")
+    last_success_at = saved.get("last_success_at")
+    await db.live_sessions.update_one(
+        {"_id": video_id},
+        {"$set": {
+            "chat_id": chat_id, "info": info, "status": "watching",
+            "resumed_at": datetime.now(timezone.utc),
+        }, "$setOnInsert": {"started_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+
     while True:
         try:
             params = {"liveChatId": chat_id, "part": "snippet,authorDetails", "maxResults": 2000}
@@ -456,14 +520,55 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
             for item in data.get("items", []):
                 await handle_message(item, video_id, info)
             token = data.get("nextPageToken")
+            last_success_at = datetime.now(timezone.utc)
+            await db.live_sessions.update_one(
+                {"_id": video_id},
+                {"$set": {
+                    "chat_id": chat_id, "info": info, "next_page_token": token,
+                    "last_success_at": last_success_at, "status": "watching",
+                }},
+                upsert=True,
+            )
             await asyncio.sleep(max(data.get("pollingIntervalMillis", 10000), 10000) / 1000)
         except YTError as e:
             if e.reason in ("liveChatEnded", "liveChatNotFound"):
+                ended_at = datetime.now(timezone.utc)
                 log.info("Live %s đã kết thúc", video_id)
+                await db.live_sessions.update_one(
+                    {"_id": video_id},
+                    {"$set": {"status": "ended", "ended_at": ended_at}},
+                    upsert=True,
+                )
+                if saved.get("paused_at") or (last_success_at and saved.get("quota_paused")):
+                    await db.recovery_jobs.update_one(
+                        {"_id": video_id},
+                        {"$setOnInsert": {
+                            "video_id": video_id, "channel_id": info.get("channel_id"),
+                            "title": info.get("title"), "gap_start": last_success_at,
+                            "gap_end": ended_at, "status": "needs_review",
+                            "reason": "Live Chat ended after quota interruption",
+                            "created_at": ended_at,
+                        }},
+                        upsert=True,
+                    )
                 return
-            if e.reason in ("quotaExceeded", "rateLimitExceeded"):
-                log.error("Hết quota YouTube, chờ 10 phút")
-                await asyncio.sleep(600)
+            if e.reason in ("quotaExceeded", "localQuotaLimit"):
+                reset_at = quota_reset_at()
+                paused_at = datetime.now(timezone.utc)
+                log.error("Quota YouTube đã hết; tạm dừng live %s đến %s", video_id, reset_at.isoformat())
+                await db.live_sessions.update_one(
+                    {"_id": video_id},
+                    {"$set": {
+                        "status": "quota_paused", "quota_paused": True,
+                        "paused_at": paused_at, "quota_reset_at": reset_at,
+                        "next_page_token": token, "last_success_at": last_success_at,
+                    }},
+                    upsert=True,
+                )
+                await asyncio.sleep(max((reset_at - datetime.now(timezone.utc)).total_seconds(), 60))
+            elif e.reason == "rateLimitExceeded":
+                log.warning("YouTube giới hạn tốc độ đọc live %s; chờ 30 giây", video_id)
+                await asyncio.sleep(30)
             else:
                 log.warning("Lỗi YouTube: %s", e)
                 await asyncio.sleep(30)
@@ -487,7 +592,15 @@ async def follow_map() -> dict[str, set[int]]:
 async def monitor():
     try:
         follow = await follow_map()
-        live = await find_live_chats(list(follow)) if follow else {}
+        quota = await quota_status()
+        reserve_reached = (
+            quota["used"] >= max(YT_DAILY_QUOTA_LIMIT - YT_QUOTA_RESERVE, 0)
+            or (quota.get("blocked_until") and quota["blocked_until"] > datetime.now(timezone.utc))
+        )
+        # Khi gần hết quota, bỏ dò live bằng videos.list; RSS vẫn chạy không tốn quota.
+        live = await find_live_chats(list(follow)) if follow and not reserve_reached else {}
+        if reserve_reached:
+            log.warning("Đang giữ quota dự phòng cho Live Chat (%s/%s units)", quota["used"], YT_DAILY_QUOTA_LIMIT)
         feeds = {
             channel_id: await fetch_channel_videos(channel_id)
             for channel_id in follow
