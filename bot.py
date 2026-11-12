@@ -869,21 +869,43 @@ async def on_app_error(inter: discord.Interaction, error: app_commands.AppComman
         pass
 
 
-@bot.tree.command(name="link", description="Liên kết kênh YouTube của bạn với tài khoản Discord")
-async def link_cmd(inter: discord.Interaction):
-    code = "DC-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+@bot.tree.command(name="link", description="Tạo mã xác minh cho kênh YouTube của bạn")
+@app_commands.describe(kenh="Link kênh, @handle hoặc ID kênh YouTube của bạn")
+@app_commands.checks.cooldown(1, 20.0)
+async def link_cmd(inter: discord.Interaction, kenh: str):
+    await inter.response.defer(ephemeral=True)
+    try:
+        au = await resolve_youtube(kenh)
+        if not au:
+            await inter.followup.send("Không tìm thấy kênh YouTube này.")
+            return
+    except YTError as exc:
+        await inter.followup.send(f"Lỗi YouTube API: {exc}")
+        return
+
+    cid = au["channelId"]
+    old = await db.links.find_one({"_id": cid})
+    if old:
+        if int(old.get("discord_id", 0)) == inter.user.id:
+            await inter.followup.send("Kênh này đã được liên kết với Discord của bạn.")
+        else:
+            await inter.followup.send("Kênh này đã được liên kết với một tài khoản Discord khác.")
+        return
+
+    code = "YT-" + "".join(
+        secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12)
+    )
     await db.link_codes.insert_one({
         "_id": code,
         "discord_id": inter.user.id,
-        "expires": datetime.now(timezone.utc) + timedelta(minutes=30),
+        "guild_id": inter.guild_id,
+        "channel_id": cid,
+        "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
     })
-    await inter.response.send_message(
-        f"Mã của bạn: **{code}** (hết hạn sau 30 phút). Không cần đăng nhập hay cấp quyền gì.\n"
-        "**Cách 1 (khi kênh đang live):** gõ đúng mã này vào live chat YouTube bằng kênh bạn dùng để donate.\n"
-        "**Cách 2 (bất cứ lúc nào):** dán mã vào phần *Giới thiệu* của kênh YouTube, lưu lại, "
-        "rồi gõ `/xacminh` kèm link hoặc @handle kênh của bạn. Xong có thể xoá mã đi.\n"
-        "Liên kết dùng chung cho mọi server.",
-        ephemeral=True,
+    await inter.followup.send(
+        f"Thêm mã **{code}** vào phần Giới thiệu của kênh **{au['displayName']}**, lưu lại rồi bấm nút bên dưới. "
+        "Mã chỉ dùng một lần và hết hạn sau 10 phút.",
+        view=YouTubeVerifyView(code, inter.user.id, au),
     )
 
 
