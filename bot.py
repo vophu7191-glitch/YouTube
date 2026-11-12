@@ -184,6 +184,24 @@ async def find_live_chats(channels: list[str]) -> dict[str, dict]:
         d = v.get("liveStreamingDetails", {})
         if d.get("actualEndTime"):
             ended.add(v["id"])
+            saved = await db.live_sessions.find_one({"_id": v["id"], "quota_paused": True})
+            if saved:
+                ended_at = datetime.fromisoformat(d["actualEndTime"].replace("Z", "+00:00"))
+                await db.recovery_jobs.update_one(
+                    {"_id": v["id"]},
+                    {"$setOnInsert": {
+                        "video_id": v["id"], "channel_id": saved.get("info", {}).get("channel_id"),
+                        "title": saved.get("info", {}).get("title"),
+                        "gap_start": saved.get("last_success_at"), "gap_end": ended_at,
+                        "status": "needs_review",
+                        "reason": "Live ended while quota recovery was pending",
+                        "created_at": datetime.now(timezone.utc),
+                    }},
+                    upsert=True,
+                )
+                await db.live_sessions.update_one(
+                    {"_id": v["id"]}, {"$set": {"status": "ended", "ended_at": ended_at}}
+                )
         if d.get("activeLiveChatId") and d.get("actualStartTime") and not d.get("actualEndTime"):
             out[v["id"]] = video_info(v, d["activeLiveChatId"])
     return out
