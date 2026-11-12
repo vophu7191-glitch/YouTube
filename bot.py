@@ -372,11 +372,21 @@ async def handle_message(item: dict, video_id: str, info: dict):
 async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
     """Quà Ngọc (Jewels). Cùng một ID tin nhắn được dùng lại khi combo tăng -> cập nhật, không cộng trùng."""
     au = item["authorDetails"]
-    g = (item["snippet"].get("giftEventDetails") or {}).get("giftMetadata") or {}
+    sn = item["snippet"]
+    # YouTube Data API v3 trả quà Ngọc ở snippet.giftDetails.
+    # Giữ fallback cấu trúc cũ để không làm hỏng dữ liệu từ nguồn khác.
+    g = sn.get("giftDetails") or (
+        (sn.get("giftEventDetails") or {}).get("giftMetadata")
+    ) or {}
     combo = max(int(g.get("comboCount") or 1), 1)
-    jewels = int(g.get("jewelsAmount") or 0) * combo  # nếu số liệu lệch, sửa đúng dòng này
-    if jewels <= 0 or not gids:
+    jewels_each = int(g.get("jewelsAmount") or 0)
+    if jewels_each <= 0:
+        log.warning("giftEvent không có jewelsAmount hợp lệ; fields=%s", sorted(g.keys()))
         return
+    if not gids:
+        log.warning("Nhận giftEvent nhưng live %s chưa có server đăng ký theo dõi", video_id)
+        return
+    jewels = jewels_each * combo
     vnd = int(jewels * JEWEL_RATE_VND)
     name = g.get("giftName") or "quà"
     note = f"🎁 {name}" + (f" x{combo}" if combo > 1 else "")
