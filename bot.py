@@ -801,6 +801,12 @@ class YouTubeVerifyView(discord.ui.View):
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild or not MESSAGE_CONTENT_INTENT:
         return
+
+    # Chỉ nhận diện link tự động trong kênh do admin cấu hình riêng cho server.
+    cfg = await guild_cfg(message.guild.id)
+    if message.channel.id != cfg.get("youtube_link_channel"):
+        return
+
     match = YOUTUBE_CHANNEL_LINK_RE.search(message.content)
     if not match:
         return
@@ -852,6 +858,67 @@ async def on_message(message: discord.Message):
     task = asyncio.create_task(delete_source_message())
     message_delete_tasks.add(task)
     task.add_done_callback(message_delete_tasks.discard)
+
+
+@bot.tree.command(name="setkenhnhanlink", description="Chọn kênh duy nhất để Jion tự nhận diện link YouTube (admin)")
+@app_commands.describe(kenh="Kênh văn bản nhận link YouTube")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def setkenhnhanlink_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    me = inter.guild.me if inter.guild else None
+    perms = kenh.permissions_for(me) if me else None
+    if not perms or not perms.view_channel or not perms.send_messages or not perms.read_message_history:
+        await inter.response.send_message(
+            "Jion cần quyền Xem kênh, Gửi tin nhắn và Đọc lịch sử tin nhắn trong kênh đó.",
+            ephemeral=True,
+        )
+        return
+    await db.guilds.update_one(
+        {"_id": inter.guild_id},
+        {"$set": {"youtube_link_channel": kenh.id}},
+        upsert=True,
+    )
+    await inter.response.send_message(
+        f"Đã đặt {kenh.mention} làm kênh duy nhất để Jion tự nhận diện link YouTube trong server này.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="xemkenhnhanlink", description="Xem kênh đang nhận diện link YouTube tự động")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def xemkenhnhanlink_cmd(inter: discord.Interaction):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    cid = (await guild_cfg(inter.guild_id)).get("youtube_link_channel")
+    channel = inter.guild.get_channel(cid) if cid else None
+    if channel:
+        msg = f"Jion đang tự nhận diện link YouTube tại {channel.mention}."
+    else:
+        msg = "Server chưa đặt kênh nhận diện link. Jion hiện không tự động xử lý link trong chat."
+    await inter.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="huykenhnhanlink", description="Tắt nhận diện link YouTube tự động trong server này (admin)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def huykenhnhanlink_cmd(inter: discord.Interaction):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    result = await db.guilds.update_one(
+        {"_id": inter.guild_id},
+        {"$unset": {"youtube_link_channel": ""}},
+    )
+    if result.modified_count:
+        msg = "Đã tắt nhận diện link YouTube tự động. Các lệnh xác minh thủ công vẫn dùng được."
+    else:
+        msg = "Server chưa cấu hình kênh nhận diện link."
+    await inter.response.send_message(msg, ephemeral=True)
 
 
 @bot.tree.error
