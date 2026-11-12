@@ -69,49 +69,76 @@ message_delete_tasks: set[asyncio.Task] = set()
 ended: set[str] = set()  # video đã live xong, không kiểm tra lại
 
 
-def make_particle_gif() -> io.BytesIO | None:
-    """Tạo dải hạt hình học động trong suốt để trang trí bảng Top Donate."""
+def make_particle_gif(username: str, amount: int) -> io.BytesIO | None:
+    """Tạo GIF pixel/khối chữ nhật ghép tên người donate và số tiền rồi dừng."""
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
 
-        width, height, frame_count = 480, 72, 18
-        palette = [
-            0, 0, 0, 91, 190, 255, 255, 190, 92, 255, 116, 151,
-            167, 139, 250, 101, 220, 180, 255, 225, 120, 190, 205, 220,
+        width, height = 480, 112
+        username = (username or "Top Donor").strip()[:34]
+        amount_text = f"{amount:,}₫"
+        try:
+            font_name = ImageFont.truetype("DejaVuSans-Bold.ttf", 25)
+            font_amount = ImageFont.truetype("DejaVuSans-Bold.ttf", 31)
+        except OSError:
+            font_name = ImageFont.load_default()
+            font_amount = ImageFont.load_default()
+
+        mask = Image.new("L", (width, height), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        name_box = mask_draw.textbbox((0, 0), username, font=font_name)
+        amount_box = mask_draw.textbbox((0, 0), amount_text, font=font_amount)
+        name_x = (width - (name_box[2] - name_box[0])) // 2
+        amount_x = (width - (amount_box[2] - amount_box[0])) // 2
+        mask_draw.text((name_x, 17 - name_box[1]), username, font=font_name, fill=255)
+        mask_draw.text((amount_x, 59 - amount_box[1]), amount_text, font=font_amount, fill=255)
+
+        targets = [
+            (x, y) for y in range(0, height, 3) for x in range(0, width, 3)
+            if mask.getpixel((x, y)) > 80
         ]
+        if not targets:
+            return None
+
         rng = random.Random(2026)
-        particles = [
-            (rng.randrange(width), rng.randrange(height), rng.choice((-2, -1, 1, 2)),
-             rng.choice((-1, 0, 1)), rng.choice((2, 3, 4)),
-             rng.choice(("dot", "triangle", "diamond")), rng.randrange(1, 8))
-            for _ in range(34)
+        rng.shuffle(targets)
+        targets = targets[:min(260, len(targets))]
+        colors = [(92, 205, 255), (54, 150, 255), (170, 230, 255), (255, 205, 110)]
+        starts = [
+            (rng.randrange(width), rng.randrange(height), rng.choice(colors), rng.choice((3, 4, 5, 6)))
+            for _ in targets
         ]
+
         frames = []
+        frame_count = 20
         for step in range(frame_count):
-            frame = Image.new("P", (width, height), 0)
-            frame.putpalette(palette + [0] * (768 - len(palette)))
+            progress = step / (frame_count - 1)
+            eased = 1 - (1 - progress) ** 3
+            frame = Image.new("RGB", (width, height), (10, 14, 24))
             draw = ImageDraw.Draw(frame)
-            for x0, y0, vx, vy, size, shape, color in particles:
-                x = (x0 + step * vx) % (width + 12) - 6
-                y = (y0 + step * vy) % (height + 10) - 5
-                if shape == "dot":
-                    draw.ellipse((x, y, x + size, y + size), fill=color)
-                elif shape == "triangle":
-                    draw.polygon(((x, y + size), (x + size, y + size), (x + size // 2, y)), fill=color)
-                else:
-                    draw.polygon(((x + size // 2, y), (x + size, y + size // 2),
-                                  (x + size // 2, y + size), (x, y + size // 2)), fill=color)
+            for (tx, ty), (sx, sy, color, size) in zip(targets, starts):
+                x = round(sx + (tx - sx) * eased)
+                y = round(sy + (ty - sy) * eased)
+                draw.rectangle((x, y, x + size, y + size), fill=color)
             frames.append(frame)
 
+        final = Image.new("RGB", (width, height), (10, 14, 24))
+        draw = ImageDraw.Draw(final)
+        draw.text((name_x, 17 - name_box[1]), username, font=font_name, fill=(185, 225, 255))
+        draw.text((amount_x, 59 - amount_box[1]), amount_text, font=font_amount, fill=(255, 205, 110))
+        frames.append(final)
+        durations = [65] * frame_count + [2600]
+
         output = io.BytesIO()
-        frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:],
-                       duration=100, loop=0, transparency=0, disposal=2, optimize=True)
+        frames[0].save(
+            output, format="GIF", save_all=True, append_images=frames[1:],
+            duration=durations, disposal=2, optimize=True,
+        )
         output.seek(0)
         return output
     except Exception:
-        log.exception("Không tạo được hiệu ứng hạt cho bảng Top Donate")
+        log.exception("Không tạo được GIF pixel cho bảng Top Donate")
         return None
-
 
 # ---------- YouTube ----------
 class YTError(Exception):
@@ -2124,6 +2151,8 @@ async def top_cmd(
 
     colors = [discord.Color.gold(), discord.Color.light_grey(), discord.Color.orange()]
     embeds = []
+    top_label = None
+    top_total = int(rows[0]["total"])
     for i, row in enumerate(rows, 1):
         cid = row["_id"]
         if cid.startswith("dc:"):
@@ -2144,9 +2173,11 @@ async def top_cmd(
             line = f"<@{link['discord_id']}> (ID: `{link['discord_id']}`)\n" + line
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
+        if i == 1:
+            top_label = label
         embeds.append(e)
     content = f"🏆 **Top donate • {sname}**\n-# Tổng hợp các khoản donate đã ghi nhận"
-    particle_gif = await asyncio.to_thread(make_particle_gif)
+    particle_gif = await asyncio.to_thread(make_particle_gif, top_label or "Top Donor", top_total)
     send_args = {"content": content, "embeds": embeds}
     if particle_gif:
         embeds[0].set_image(url="attachment://top-particles.gif")
