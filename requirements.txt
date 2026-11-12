@@ -3,4 +3,3 @@ aiohttp>=3.9
 motor>=3.5
 dnspython>=2.6
 certifi
-Pillow>=10.0
