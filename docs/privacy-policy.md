@@ -77,7 +77,7 @@ Temporary verification records are configured to expire after approximately ten 
 
 A successfully verified Discord-to-YouTube association remains in the database until it is unlinked or deleted. A user can use the bot's `/unlink` command to remove their own stored channel association. A server administrator with the required permission can use `/huylienket` to remove a member's association.
 
-Unlinking removes the association; it does not automatically erase historical donation, gift, livestream, or server records that may be needed for the bot's features. To request review or deletion of other stored records, contact the operator using the private contact method provided by the server or bot operator.
+Unlinking removes the association; it does not automatically erase historical donation, gift, livestream, or server records that may be needed for the bot's features. To request review or deletion of other stored records, contact the operator using the contact email provided below.
 
 ## 9. Sharing and disclosure
 
@@ -97,9 +97,9 @@ This policy may be updated when Jion's features or data practices change. The ef
 
 ## 13. Contact and privacy requests
 
-For privacy questions or requests to access, correct, or delete information, contact the Jion operator through this private contact method:
+For privacy questions or requests to access, correct, or delete information, contact the Jion operator at:
 
-**[ADD A PRIVATE CONTACT EMAIL OR SUPPORT METHOD BEFORE PUBLISHING]**
+**vophu7191@gmail.com**
 
 Do not include passwords, verification codes, bot tokens, API keys, or other secrets in a privacy request.
  
@@ -180,7 +180,7 @@ Bản ghi xác minh tạm thời được cấu hình tự hết hạn sau kho�
 
 Liên kết Discord–YouTube sau khi xác minh sẽ được lưu cho đến khi người dùng hủy liên kết hoặc dữ liệu được xóa. Người dùng có thể dùng lệnh `/unlink` để xóa liên kết kênh của chính mình. Quản trị viên máy chủ có quyền phù hợp có thể dùng lệnh `/huylienket` để xóa liên kết của một thành viên.
 
-Hủy liên kết chỉ xóa bản ghi liên kết; thao tác này không tự động xóa lịch sử donate, quà tặng, livestream hoặc dữ liệu máy chủ có thể cần cho các tính năng của bot. Để yêu cầu xem xét hoặc xóa các dữ liệu khác, hãy liên hệ người vận hành qua phương thức liên hệ riêng do chủ bot hoặc máy chủ cung cấp.
+Hủy liên kết chỉ xóa bản ghi liên kết; thao tác này không tự động xóa lịch sử donate, quà tặng, livestream hoặc dữ liệu máy chủ có thể cần cho các tính năng của bot. Để yêu cầu xem xét hoặc xóa các dữ liệu khác, hãy liên hệ người vận hành qua email bên dưới.
 
 ## 9. Chia sẻ và cung cấp thông tin
 
@@ -200,8 +200,8 @@ Chính sách có thể được cập nhật khi tính năng hoặc cách xử l
 
 ## 13. Liên hệ và yêu cầu về quyền riêng tư
 
-Nếu có câu hỏi về quyền riêng tư hoặc muốn yêu cầu truy cập, chỉnh sửa hay xóa thông tin, hãy liên hệ người vận hành Jion qua phương thức liên hệ riêng sau:
+Nếu có câu hỏi về quyền riêng tư hoặc muốn yêu cầu truy cập, chỉnh sửa hay xóa thông tin, hãy liên hệ người vận hành Jion qua email:
 
-**[BỔ SUNG EMAIL HOẶC PHƯƠNG THỨC HỖ TRỢ RIÊNG TRƯỚC KHI CÔNG KHAI]**
+**vophu7191@gmail.com**
 
 Không gửi mật khẩu, mã xác minh, bot token, API key hoặc thông tin bí mật khác trong yêu cầu quyền riêng tư.
