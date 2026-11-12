@@ -256,7 +256,7 @@ async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content") 
             log.warning("Không truy cập được kênh thông báo %s: %s", channel_id, ex)
             ch = None
     if not ch:
-        command = "/kenhthongbaodonate" if purpose == "donate" else "/kenhthongbao"
+        command = "/set-kênh-thông-báo-donate" if purpose == "donate" else "/set-kênh-thông-báo"
         return f"chưa đặt kênh thông báo (dùng {command}) hoặc bot không thấy kênh đó"
     try:
         await ch.send(embed=embed)
@@ -273,9 +273,11 @@ async def announce_video(gid: int, video: dict):
         url=f"https://www.youtube.com/watch?v={video['video_id']}",
         description=f"Kênh **{video['channel']}** vừa đăng video mới.",
         color=discord.Color.blurple(),
+        timestamp=datetime.now(timezone.utc),
     )
     if video.get("thumb"):
         embed.set_image(url=video["thumb"])
+    embed.set_footer(text="THÔNG BÁO VIDEO MỚI • YouTube")
     err = await send_notice(gid, embed, purpose="content")
     if err:
         log.warning("Không gửi được thông báo video mới (server %s): %s", gid, err)
@@ -294,9 +296,11 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
             f"Bot bắt đầu theo dõi donate ({source})."
         ),
         color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc),
     )
     if info.get("thumb"):
         e.set_image(url=info["thumb"])
+    e.set_footer(text="ĐANG THEO DÕI LIVE CHAT • YouTube")
     err = await send_notice(gid, e)
     if err:
         log.warning("Không gửi được thông báo live (server %s): %s", gid, err)
@@ -367,6 +371,9 @@ async def try_link(code: str, au: dict, gids: list[int]):
         ),
     )
     e.set_author(name=au["displayName"], icon_url=au.get("profileImageUrl"))
+    e.title = "✅ LIÊN KẾT YOUTUBE THÀNH CÔNG"
+    e.timestamp = datetime.now(timezone.utc)
+    e.set_footer(text="Xác minh kênh YouTube")
     for gid in gids:
         g = bot.get_guild(gid)
         if not g or not await is_member(g, doc["discord_id"]):
@@ -489,17 +496,26 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     info = await db.channels.find_one({"_id": au["channelId"]}) or {}
     link = await db.links.find_one({"_id": au["channelId"]})
     who = f"<@{link['discord_id']}>" if link else (info.get("handle") or au["displayName"])
+    is_jewel = d.get("currency") == "JEWEL"
+    amount = d.get("amountDisplayString") or "Ủng hộ"
     e = discord.Embed(
-        color=discord.Color.gold(),
-        description=(
-            f"{who} vừa donate **{d.get('amountDisplayString', '')}** (~{vnd:,}₫)\n{d.get('userComment', '')}"
-            + (f"\n⚠️ Chưa có tỷ giá cho {d.get('currency')}, đang tính 0₫ (thêm vào RATES_VND)."
-               if d.get("currency") not in RATES_VND else "")
-        ),
+        title="💎 QUÀ NGỌC MỚI" if is_jewel else "💛 DONATE MỚI",
+        url=f"https://www.youtube.com/channel/{au['channelId']}",
+        description=f"**{who}** vừa gửi quà ủng hộ!",
+        color=discord.Color.purple() if is_jewel else discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
     )
-    e.set_author(name=info.get("handle") or au["displayName"], icon_url=au["profileImageUrl"])
-    if stream and stream.get("channel"):
-        e.set_footer(text=f"Kênh: {stream['channel']}")
+    e.set_author(name=info.get("handle") or au["displayName"], icon_url=au.get("profileImageUrl"))
+    e.add_field(name="🎁 Số Ngọc" if is_jewel else "💰 Số tiền ủng hộ",
+                value=f"**{amount}**", inline=True)
+    e.add_field(name="💵 Giá trị quy đổi ước tính",
+                value=f"**{vnd:,}₫**", inline=True)
+    comment = (d.get("userComment") or "").strip()
+    if comment:
+        e.add_field(name="💬 Lời nhắn", value=comment[:1024], inline=False)
+    if d.get("currency") not in RATES_VND:
+        e.add_field(name="⚠️ Tỷ giá", value=f"Chưa có tỷ giá cho {d.get('currency')}; giá trị quy đổi hiện là 0₫.", inline=False)
+    e.set_footer(text=f"Cảm ơn bạn đã ủng hộ{f' • Live: {stream["channel"]}' if stream and stream.get("channel") else ''}")
     err = await send_notice(gid, e, purpose="donate")
     if err:
         log.warning("Không báo được donate (server %s): %s", gid, err)
@@ -1215,7 +1231,7 @@ async def on_message(message: discord.Message):
         link_message_pending.discard(key)
 
 
-@bot.tree.command(name="setkenhnhanlink", description="Chọn kênh duy nhất để Jion tự nhận diện link YouTube (admin)")
+@bot.tree.command(name="set-kênh-nhận-link", description="Chọn kênh duy nhất để Jion tự nhận diện link YouTube (admin)")
 @app_commands.describe(kenh="Kênh văn bản nhận link YouTube")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -1242,7 +1258,7 @@ async def setkenhnhanlink_cmd(inter: discord.Interaction, kenh: discord.TextChan
     )
 
 
-@bot.tree.command(name="setkenhxacminh", description="Chọn kênh công khai danh sách thành viên đã xác minh YouTube (admin)")
+@bot.tree.command(name="set-kênh-xác-minh", description="Chọn kênh công khai danh sách thành viên đã xác minh YouTube (admin)")
 @app_commands.describe(kenh="Kênh văn bản công khai danh sách xác minh")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -1254,7 +1270,7 @@ async def setkenhxacminh_cmd(inter: discord.Interaction, kenh: discord.TextChann
     perms = kenh.permissions_for(me) if me else None
     if not perms or not perms.view_channel or not perms.send_messages or not perms.embed_links:
         await inter.response.send_message(
-            "Jion cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
+            "Bot cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
             ephemeral=True,
         )
         return
@@ -1269,7 +1285,7 @@ async def setkenhxacminh_cmd(inter: discord.Interaction, kenh: discord.TextChann
     )
 
 
-@bot.tree.command(name="xemkenhxacminh", description="Xem kênh công khai danh sách xác minh YouTube")
+@bot.tree.command(name="xem-kênh-xác-minh", description="Xem kênh công khai danh sách xác minh YouTube")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def xemkenhxacminh_cmd(inter: discord.Interaction):
@@ -1285,7 +1301,7 @@ async def xemkenhxacminh_cmd(inter: discord.Interaction):
     await inter.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="xemkenhnhanlink", description="Xem kênh đang nhận diện link YouTube tự động")
+@bot.tree.command(name="xem-kênh-nhận-link", description="Xem kênh đang nhận diện link YouTube tự động")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def xemkenhnhanlink_cmd(inter: discord.Interaction):
@@ -1301,7 +1317,7 @@ async def xemkenhnhanlink_cmd(inter: discord.Interaction):
     await inter.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="huykenhnhanlink", description="Tắt nhận diện link YouTube tự động trong server này (admin)")
+@bot.tree.command(name="hủy-kênh-nhận-link", description="Tắt nhận diện link YouTube tự động trong server này (admin)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def huykenhnhanlink_cmd(inter: discord.Interaction):
@@ -1334,7 +1350,7 @@ async def on_app_error(inter: discord.Interaction, error: app_commands.AppComman
         pass
 
 
-@bot.tree.command(name="link", description="Tạo mã xác minh cho kênh YouTube của bạn")
+@bot.tree.command(name="liên-kết-youtube", description="Tạo mã xác minh cho kênh YouTube của bạn")
 @app_commands.describe(kenh="Link kênh, @handle hoặc ID kênh YouTube của bạn")
 @app_commands.checks.cooldown(1, 20.0)
 async def link_cmd(inter: discord.Interaction, kenh: str):
@@ -1374,7 +1390,7 @@ async def link_cmd(inter: discord.Interaction, kenh: str):
     )
 
 
-@bot.tree.command(name="xacminh", description="Xác minh kênh YouTube bằng mã trong phần Giới thiệu kênh")
+@bot.tree.command(name="xác-minh-youtube", description="Xác minh kênh YouTube bằng mã trong phần Giới thiệu kênh")
 @app_commands.describe(kenh="Link kênh, @handle hoặc ID kênh YouTube của bạn")
 @app_commands.checks.cooldown(1, 20.0)
 async def xacminh_cmd(inter: discord.Interaction, kenh: str):
@@ -1657,7 +1673,7 @@ class VerifiedView(discord.ui.View):
         await inter.response.edit_message(embed=self.embed(), view=self)
 
 
-@bot.tree.command(name="danhsachlienket", description="Xem từng thành viên chưa liên kết YouTube và xác minh thủ công (admin)")
+@bot.tree.command(name="danh-sách-liên-kết", description="Xem từng thành viên chưa liên kết YouTube và xác minh thủ công (admin)")
 @app_commands.describe(tim="Lọc theo tên (tuỳ chọn)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -1807,7 +1823,7 @@ class RandomReviewView(discord.ui.View):
         await self._advance(inter, note)
 
 
-@bot.tree.command(name="randomlienket", description="Bốc ngẫu nhiên 10 thành viên để kiểm tra liên kết YouTube (admin)")
+@bot.tree.command(name="chọn-ngẫu-nhiên-liên-kết", description="Bốc ngẫu nhiên 10 thành viên để kiểm tra liên kết YouTube (admin)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def randomlienket_cmd(inter: discord.Interaction):
@@ -1834,7 +1850,7 @@ async def randomlienket_cmd(inter: discord.Interaction):
     await inter.followup.send(content=banner, embed=view.embed(), view=view, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="bangxacminh", description="Bảng những thành viên đã liên kết YouTube trong server này (admin)")
+@bot.tree.command(name="bảng-xác-minh", description="Bảng những thành viên đã liên kết YouTube trong server này (admin)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def bangxacminh_cmd(inter: discord.Interaction):
@@ -1856,7 +1872,7 @@ async def bangxacminh_cmd(inter: discord.Interaction):
     await inter.followup.send(embed=view.embed(), view=view, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="timlienket", description="Kiểm tra thành viên đã liên kết YouTube hay chưa (admin)")
+@bot.tree.command(name="tìm-liên-kết", description="Kiểm tra thành viên đã liên kết YouTube hay chưa (admin)")
 @app_commands.describe(nguoi_dung="Thành viên cần tra cứu")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -1888,7 +1904,7 @@ async def timlienket_cmd(inter: discord.Interaction, nguoi_dung: discord.Member)
     await inter.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="huylienket", description="Huỷ liên kết YouTube của một thành viên (admin)")
+@bot.tree.command(name="hủy-liên-kết", description="Huỷ liên kết YouTube của một thành viên (admin)")
 @app_commands.describe(nguoi_dung="Thành viên cần huỷ liên kết")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -1899,7 +1915,7 @@ async def huylienket_cmd(inter: discord.Interaction, nguoi_dung: discord.Member)
     )
 
 
-@bot.tree.command(name="unlink", description="Huỷ liên kết YouTube của bạn")
+@bot.tree.command(name="gỡ-liên-kết", description="Huỷ liên kết YouTube của bạn")
 async def unlink_cmd(inter: discord.Interaction):
     r = await db.links.delete_many({"discord_id": inter.user.id})
     await inter.response.send_message(f"Đã huỷ {r.deleted_count} liên kết.", ephemeral=True)
@@ -1966,7 +1982,7 @@ class RankingView(discord.ui.View):
         rows = await rank_page(self.gid, self.sid, self.page * RANK_PER, RANK_PER)
         lines = await rank_lines(rows, self.page * RANK_PER + 1)
         e = discord.Embed(
-            title=f"🏆 Bảng xếp hạng vĩnh viễn • {self.sname}"[:256],
+            title=f"🏆 Bảng xếp hạng donate • {self.sname}"[:256],
             description="\n".join(lines) or "Chưa có ai.",
             color=discord.Color.blurple(),
         )
@@ -2010,7 +2026,7 @@ class TopMoreView(discord.ui.View):
                 pass
 
 
-@bot.tree.command(name="bangxephang", description="Danh sách đầy đủ xếp hạng donate vĩnh viễn, gồm cả người ngoài top 10")
+@bot.tree.command(name="bảng-xếp-hạng", description="Xem danh sách xếp hạng donate đầy đủ, gồm cả người ngoài top 10")
 @app_commands.describe(
     kenh="Kênh cần xem (chọn từ gợi ý). Bỏ trống = tự chọn nếu server chỉ có 1 kênh",
     trang="Trang bắt đầu (mỗi trang 10 người, trang 2 = hạng 11-20)",
@@ -2031,7 +2047,7 @@ async def bangxephang_cmd(inter: discord.Interaction, kenh: str | None = None, t
     await inter.followup.send(embed=await view.embed(), view=view, ephemeral=True, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="top", description="Bảng xếp hạng top donate vĩnh viễn của một kênh YouTube trong server này")
+@bot.tree.command(name="top-donate", description="Xem bảng xếp hạng donate của một kênh YouTube trong server này")
 @app_commands.describe(
     kenh="Kênh cần xem (chọn từ gợi ý). Bỏ trống = tự chọn nếu server chỉ có 1 kênh",
     limit="Số người hiển thị (1-10)",
@@ -2082,7 +2098,7 @@ async def top_cmd(
         e = discord.Embed(description=line, color=colors[i - 1] if i <= 3 else discord.Color.blurple())
         e.set_author(name=f"#{i} • {label}", icon_url=info.get("avatar"))
         embeds.append(e)
-    content = f"🏆 **Top donate vĩnh viễn • {sname}**\n-# Cộng dồn từ trước đến nay, không reset theo tháng hay năm"
+    content = f"🏆 **Top donate • {sname}**\n-# Tổng hợp các khoản donate đã ghi nhận"
     donors, total = await rank_summary(gid, sid)
     if donors > limit:  # còn người phía sau -> có nút xem tiếp
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
@@ -2091,7 +2107,7 @@ async def top_cmd(
         await inter.followup.send(content=content, embeds=embeds)
 
 
-@bot.tree.command(name="watch", description="Theo dõi thủ công một live stream (admin)")
+@bot.tree.command(name="theo-dõi-live", description="Theo dõi thủ công một live stream (admin)")
 @app_commands.describe(video="Link hoặc ID video đang live")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2129,7 +2145,7 @@ async def watch_cmd(inter: discord.Interaction, video: str):
     await inter.followup.send(f"{status} live **{info['title']}** (`{vid}`).{note}")
 
 
-@bot.tree.command(name="themdonate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
+@bot.tree.command(name="thêm-donate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
 @app_commands.describe(
     so_tien="Số tiền đã donate",
     tien_te="Loại tiền: VND, USD...",
@@ -2200,7 +2216,7 @@ async def themdonate_cmd(
     )
 
 
-@bot.tree.command(name="xoadonate", description="Xoá một khoản donate hoặc cả lô nhập CSV (admin)")
+@bot.tree.command(name="xóa-donate", description="Xoá một khoản donate hoặc cả lô nhập CSV (admin)")
 @app_commands.describe(ma="Chọn khoản trong danh sách gợi ý, hoặc nhập batch-xxxxxx để xoá cả lô CSV")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2242,7 +2258,7 @@ async def xoadonate_autocomplete(inter: discord.Interaction, current: str):
     return out[:25]
 
 
-@bot.tree.command(name="nhapdonate", description="Nhập hàng loạt donate cũ từ file CSV (admin)")
+@bot.tree.command(name="nhập-donate", description="Nhập hàng loạt donate cũ từ file CSV (admin)")
 @app_commands.describe(
     file="CSV có cột: youtube, discord_id, so_tien, tien_te, ghi_chu (thêm cột kenh nếu muốn)",
     kenh="Kênh mặc định cho cả file (dòng nào có cột kenh thì dùng kênh đó)",
@@ -2305,7 +2321,7 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
     await inter.followup.send(msg[:1990])
 
 
-@bot.tree.command(name="kenhthongbao", description="Chọn kênh Discord nhận thông báo live và video mới (admin)")
+@bot.tree.command(name="set-kênh-thông-báo", description="Chọn kênh Discord nhận thông báo live và video mới (admin)")
 @app_commands.describe(kenh="Chọn kênh từ danh sách gợi ý. Bỏ trống = dùng kênh bạn đang gõ lệnh")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2319,7 +2335,7 @@ async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel
     await inter.followup.send(f"Đã đặt kênh nhận thông báo live/video mới: {kenh.mention}")
 
 
-@bot.tree.command(name="kenhthongbaodonate", description="Chọn kênh Discord chỉ nhận thông báo donate (admin)")
+@bot.tree.command(name="set-kênh-thông-báo-donate", description="Chọn kênh Discord chỉ nhận thông báo donate (admin)")
 @app_commands.describe(kenh="Kênh văn bản nhận thông báo donate")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2343,7 +2359,7 @@ async def kenhthongbaodonate_cmd(inter: discord.Interaction, kenh: discord.TextC
     )
 
 
-@bot.tree.command(name="gankenh", description="Gán donate chưa phân kênh (hoặc một khoản/lô) vào một kênh (admin)")
+@bot.tree.command(name="gán-kênh-donate", description="Gán donate chưa phân kênh (hoặc một khoản/lô) vào một kênh (admin)")
 @app_commands.describe(
     kenh="Kênh sẽ nhận các khoản donate (chọn từ gợi ý hoặc dán link/@handle)",
     ma="Mã khoản hoặc batch-xxxxxx. Bỏ trống = tất cả khoản chưa phân kênh",
@@ -2363,7 +2379,7 @@ async def gankenh_cmd(inter: discord.Interaction, kenh: str, ma: str | None = No
     await inter.followup.send(f"Đã gán {r.modified_count} khoản vào kênh **{sc[1]}**.")
 
 
-@bot.tree.command(name="theodoikenh", description="Tự động theo dõi live của một kênh YouTube trong server này (admin)")
+@bot.tree.command(name="theo-dõi-kênh", description="Tự động theo dõi live của một kênh YouTube trong server này (admin)")
 @app_commands.describe(kenh="Link kênh, @handle hoặc ID kênh YouTube (UC...)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2414,7 +2430,7 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
     await inter.followup.send(status)
 
 
-@bot.tree.command(name="huytheodoi", description="Ngừng tự động theo dõi một kênh YouTube trong server này (admin)")
+@bot.tree.command(name="hủy-theo-dõi", description="Ngừng tự động theo dõi một kênh YouTube trong server này (admin)")
 @app_commands.describe(kenh="Chọn kênh đang theo dõi từ danh sách gợi ý")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2445,7 +2461,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
 @gankenh_cmd.autocomplete("kenh")
 async def streamer_autocomplete(inter: discord.Interaction, current: str):
     items = await list_streamers(inter.guild_id)
-    if not inter.command or inter.command.name != "top":  # chỉ /top được xem mục "Chưa phân kênh"
+    if not inter.command or inter.command.name != "top-donate":  # chỉ /top được xem mục "Chưa phân kênh"
         items = [x for x in items if x[0] != UNASSIGNED]
     cur = current.strip().lower()
     return [
