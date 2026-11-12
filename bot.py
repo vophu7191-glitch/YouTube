@@ -768,6 +768,7 @@ class YouTubeVerifyView(discord.ui.View):
         self.code = code
         self.owner_id = owner_id
         self.au = au
+        self.processing = False
 
     @discord.ui.button(label="Tôi đã cập nhật mô tả", style=discord.ButtonStyle.success)
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -776,7 +777,14 @@ class YouTubeVerifyView(discord.ui.View):
                 "Nút xác minh này chỉ dành cho người đã gửi link kênh.", ephemeral=True
             )
             return
+        if self.processing:
+            await interaction.response.send_message(
+                "Yêu cầu xác minh trước vẫn đang xử lý. Vui lòng chờ.", ephemeral=True
+            )
+            return
 
+        self.processing = True
+        button.disabled = True
         await interaction.response.defer(ephemeral=True)
         try:
             success, message = await complete_youtube_link(
@@ -787,14 +795,22 @@ class YouTubeVerifyView(discord.ui.View):
         except (aiohttp.ClientError, asyncio.TimeoutError):
             success, message = False, "YouTube đang phản hồi chậm. Hãy thử lại sau."
             log.exception("YouTube description verification request failed")
+        except Exception:
+            success, message = False, "Có lỗi khi xác minh. Vui lòng thử lại sau."
+            log.exception("Unexpected YouTube verification error")
 
+        if not success:
+            self.processing = False
+            button.disabled = False
         await interaction.followup.send(message, ephemeral=True)
-        if success:
-            button.disabled = True
-            try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
-                pass
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+
+link_message_cooldowns: dict[tuple[int, int], float] = {}
+link_message_pending: set[tuple[int, int]] = set()
 
 
 @bot.event
@@ -802,7 +818,6 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild or not MESSAGE_CONTENT_INTENT:
         return
 
-    # Chỉ nhận diện link tự động trong kênh do admin cấu hình riêng cho server.
     cfg = await guild_cfg(message.guild.id)
     if message.channel.id != cfg.get("youtube_link_channel"):
         return
@@ -810,54 +825,69 @@ async def on_message(message: discord.Message):
     match = YOUTUBE_CHANNEL_LINK_RE.search(message.content)
     if not match:
         return
+
+    key = (message.guild.id, message.author.id)
+    now = asyncio.get_running_loop().time()
+    if key in link_message_pending or now < link_message_cooldowns.get(key, 0):
+        return
+
+    link_message_pending.add(key)
+    link_message_cooldowns[key] = now + 20
+    for old_key, expiry in list(link_message_cooldowns.items()):
+        if expiry <= now:
+            link_message_cooldowns.pop(old_key, None)
+
     try:
-        au = await resolve_youtube(match.group(0))
-    except YTError:
-        return
-    if not au:
-        return
-
-    cid = au["channelId"]
-    old = await db.links.find_one({"_id": cid})
-    if old:
-        if int(old.get("discord_id", 0)) == message.author.id:
-            await message.channel.send(
-                f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với Discord của bạn."
-            )
-        else:
-            await message.channel.send(
-                f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với một tài khoản Discord khác."
-            )
-        return
-
-    code = "YT-" + "".join(
-        secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12)
-    )
-    await db.link_codes.insert_one({
-        "_id": code,
-        "discord_id": message.author.id,
-        "guild_id": message.guild.id,
-        "channel_id": cid,
-        "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
-    })
-    await message.channel.send(
-        f"{message.author.mention}, để xác minh kênh {au['displayName']}:\n"
-        f"1. Thêm mã **{code}** vào phần Giới thiệu của đúng kênh YouTube.\n"
-        "2. Lưu thay đổi trên YouTube.\n"
-        "3. Quay lại đây và bấm nút bên dưới. Mã chỉ dùng một lần và hết hạn sau 10 phút.",
-        view=YouTubeVerifyView(code, message.author.id, au),
-    )
-
-    async def delete_source_message():
-        await asyncio.sleep(300)
         try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
+            au = await resolve_youtube(match.group(0))
+        except YTError:
+            return
+        if not au:
+            return
 
-    task = asyncio.create_task(delete_source_message())
-    message_delete_tasks.add(task)
-    task.add_done_callback(message_delete_tasks.discard)
+        cid = au["channelId"]
+        old = await db.links.find_one({"_id": cid})
+        if old:
+            if int(old.get("discord_id", 0)) == message.author.id:
+                await message.channel.send(
+                    f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với Discord của bạn."
+                )
+            else:
+                await message.channel.send(
+                    f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với một tài khoản Discord khác."
+                )
+            return
+
+        code = "YT-" + "".join(
+            secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12)
+        )
+        await db.link_codes.insert_one({
+            "_id": code,
+            "discord_id": message.author.id,
+            "guild_id": message.guild.id,
+            "channel_id": cid,
+            "expires": datetime.now(timezone.utc) + timedelta(minutes=10),
+        })
+        await message.channel.send(
+            f"{message.author.mention}, để xác minh kênh {au['displayName']}:\\n"
+            f"1. Thêm mã **{code}** vào phần Giới thiệu của đúng kênh YouTube.\\n"
+            "2. Lưu thay đổi trên YouTube.\\n"
+            "3. Quay lại đây và bấm nút bên dưới. Mã chỉ dùng một lần và hết hạn sau 10 phút.",
+            view=YouTubeVerifyView(code, message.author.id, au),
+        )
+
+        async def delete_source_message():
+            await asyncio.sleep(300)
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+
+        task = asyncio.create_task(delete_source_message())
+        message_delete_tasks.add(task)
+        task.add_done_callback(message_delete_tasks.discard)
+    finally:
+        link_message_pending.discard(key)
 
 
 @bot.tree.command(name="setkenhnhanlink", description="Chọn kênh duy nhất để Jion tự nhận diện link YouTube (admin)")
