@@ -515,7 +515,10 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
         e.add_field(name="💬 Lời nhắn", value=comment[:1024], inline=False)
     if d.get("currency") not in RATES_VND:
         e.add_field(name="⚠️ Tỷ giá", value=f"Chưa có tỷ giá cho {d.get('currency')}; giá trị quy đổi hiện là 0₫.", inline=False)
-    e.set_footer(text=f"Cảm ơn bạn đã ủng hộ{f' • Live: {stream["channel"]}' if stream and stream.get("channel") else ''}")
+    footer = "Cảm ơn bạn đã ủng hộ"
+    if stream and stream.get("channel"):
+        footer += f" • Live: {stream['channel']}"
+    e.set_footer(text=footer)
     err = await send_notice(gid, e, purpose="donate")
     if err:
         log.warning("Không báo được donate (server %s): %s", gid, err)
@@ -2347,7 +2350,7 @@ async def kenhthongbaodonate_cmd(inter: discord.Interaction, kenh: discord.TextC
     perms = kenh.permissions_for(me) if me else None
     if not perms or not perms.view_channel or not perms.send_messages or not perms.embed_links:
         await inter.response.send_message(
-            "Jion cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
+            "Bot cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
             ephemeral=True,
         )
         return
