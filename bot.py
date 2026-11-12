@@ -2129,14 +2129,14 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
                     log.info("Bắt đầu theo dõi live ngay sau /theodoikenh: %s", vid)
                 err = await announce_live(vid, info, "tự động", inter.guild_id)
                 if err:
-                    status += f"\\n⚠️ Đã tìm thấy live nhưng không gửi được thông báo: {err}"
+                    status += f"\n⚠️ Đã tìm thấy live nhưng không gửi được thông báo: {err}"
                 else:
-                    status += f"\\n🔴 Đã tìm thấy live **{info['title']}** và bắt đầu đọc Live Chat."
+                    status += f"\n🔴 Đã tìm thấy live **{info['title']}** và bắt đầu đọc Live Chat."
         else:
-            status += "\\nHiện kênh chưa có live đang hoạt động; bot sẽ tự phát hiện khi kênh bắt đầu live."
+            status += "\nHiện kênh chưa có live đang hoạt động; bot sẽ tự phát hiện khi kênh bắt đầu live."
     except Exception:
         log.exception("Không kiểm tra được live ngay sau /theodoikenh")
-        status += "\\n⚠️ Chưa kiểm tra được live ngay lúc này; bot vẫn sẽ tiếp tục dò tự động."
+        status += "\n⚠️ Chưa kiểm tra được live ngay lúc này; bot vẫn sẽ tiếp tục dò tự động."
     await inter.followup.send(status)
 
 
