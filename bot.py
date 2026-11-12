@@ -9,6 +9,7 @@ import re
 import secrets
 import string
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -82,6 +83,40 @@ async def yt_get(path, **params):
         return data
 
 
+async def fetch_channel_videos(channel_id: str) -> list[dict]:
+    """Lấy vài video mới nhất từ RSS của một kênh, không dùng quota YouTube API."""
+    try:
+        async with session.get(
+            "https://www.youtube.com/feeds/videos.xml",
+            params={"channel_id": channel_id},
+        ) as response:
+            if response.status != 200:
+                return []
+            root = ET.fromstring(await response.text())
+    except (aiohttp.ClientError, asyncio.TimeoutError, ET.ParseError):
+        log.exception("Không đọc được RSS kênh %s", channel_id)
+        return []
+
+    atom = "{http://www.w3.org/2005/Atom}"
+    yt = "{http://www.youtube.com/xml/schemas/2015}"
+    media = "{http://search.yahoo.com/mrss/}"
+    videos = []
+    for entry in root.findall(f"{atom}entry")[:5]:
+        video_id = entry.findtext(f"{yt}videoId")
+        if not video_id:
+            continue
+        thumbnail = entry.find(f".//{media}thumbnail")
+        videos.append({
+            "video_id": video_id,
+            "title": entry.findtext(f"{atom}title") or "Video mới",
+            "channel": entry.findtext(f"{atom}author/{atom}name") or "Kênh YouTube",
+            "published": entry.findtext(f"{atom}published"),
+            "thumb": thumbnail.get("url") if thumbnail is not None else None,
+            "channel_id": channel_id,
+        })
+    return videos
+
+
 async def find_live_chats(channels: list[str]) -> dict[str, dict]:
     """Dùng RSS (miễn phí) tìm video mới, rồi videos.list (1 quota) xem video nào đang live."""
     ids = []
@@ -137,11 +172,22 @@ async def get_announce_channel(gid: int):
     return ch
 
 
-async def send_notice(gid: int, embed: discord.Embed) -> str | None:
-    """Gửi embed vào kênh thông báo của server gid. Trả về None nếu thành công, hoặc lý do lỗi."""
-    ch = await get_announce_channel(gid)
+async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content") -> str | None:
+    """Gửi thông báo video/live hoặc donate vào kênh riêng của từng loại."""
+    cfg = await guild_cfg(gid)
+    channel_id = cfg.get("donation_announce") if purpose == "donate" else (
+        cfg.get("announce") or (ANNOUNCE_ID if gid == home_gid else 0)
+    )
+    ch = bot.get_channel(channel_id) if channel_id else None
+    if channel_id and ch is None:
+        try:
+            ch = await bot.fetch_channel(channel_id)
+        except discord.HTTPException as ex:
+            log.warning("Không truy cập được kênh thông báo %s: %s", channel_id, ex)
+            ch = None
     if not ch:
-        return "chưa đặt kênh thông báo (dùng /kenhthongbao) hoặc bot không thấy kênh đó"
+        command = "/kenhthongbaodonate" if purpose == "donate" else "/kenhthongbao"
+        return f"chưa đặt kênh thông báo (dùng {command}) hoặc bot không thấy kênh đó"
     try:
         await ch.send(embed=embed)
     except discord.Forbidden:
@@ -149,6 +195,20 @@ async def send_notice(gid: int, embed: discord.Embed) -> str | None:
     except discord.HTTPException as ex:
         return f"lỗi Discord: {ex}"
     return None
+
+
+async def announce_video(gid: int, video: dict):
+    embed = discord.Embed(
+        title=f"🎬 {video['title']}"[:256],
+        url=f"https://www.youtube.com/watch?v={video['video_id']}",
+        description=f"Kênh **{video['channel']}** vừa đăng video mới.",
+        color=discord.Color.blurple(),
+    )
+    if video.get("thumb"):
+        embed.set_image(url=video["thumb"])
+    err = await send_notice(gid, embed, purpose="content")
+    if err:
+        log.warning("Không gửi được thông báo video mới (server %s): %s", gid, err)
 
 
 async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool = False) -> str | None:
@@ -360,7 +420,7 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     e.set_author(name=info.get("handle") or au["displayName"], icon_url=au["profileImageUrl"])
     if stream and stream.get("channel"):
         e.set_footer(text=f"Kênh: {stream['channel']}")
-    err = await send_notice(gid, e)
+    err = await send_notice(gid, e, purpose="donate")
     if err:
         log.warning("Không báo được donate (server %s): %s", gid, err)
 
@@ -418,8 +478,12 @@ async def monitor():
     try:
         follow = await follow_map()
         live = await find_live_chats(list(follow)) if follow else {}
+        feeds = {
+            channel_id: await fetch_channel_videos(channel_id)
+            for channel_id in follow
+        }
     except Exception as e:
-        log.warning("Không kiểm tra được live: %s", e)
+        log.warning("Không kiểm tra được live/video: %s", e)
         return
     for vid, info in live.items():
         gids = follow.get(info["channel_id"], set())
@@ -434,6 +498,41 @@ async def monitor():
             watchers[vid] = asyncio.create_task(watch_chat(vid, info["chat"], info))
         for gid in (gids if task_new else new):
             await announce_live(vid, info, "tự động", gid)
+    live_ids = set(live)
+    for channel_id, gids in follow.items():
+        entries = feeds.get(channel_id) or []
+        if not entries:
+            continue
+        latest_id = entries[0]["video_id"]
+        for gid in gids:
+            state_id = f"{gid}:{channel_id}"
+            state = await db.feed_state.find_one({"_id": state_id})
+            if not state:
+                await db.feed_state.update_one(
+                    {"_id": state_id},
+                    {"$setOnInsert": {"video_id": latest_id}},
+                    upsert=True,
+                )
+                continue
+            previous_id = state.get("video_id")
+            if previous_id == latest_id:
+                continue
+            newer = []
+            found_previous = False
+            for entry in entries:
+                if entry["video_id"] == previous_id:
+                    found_previous = True
+                    break
+                newer.append(entry)
+            if not found_previous:
+                newer = entries[:1]
+            await db.feed_state.update_one(
+                {"_id": state_id}, {"$set": {"video_id": latest_id}}
+            )
+            for entry in reversed(newer):
+                if entry["video_id"] not in live_ids:
+                    await announce_video(gid, entry)
+
     for vid in [v for v, t in watchers.items() if t.done() and v not in live]:
         watchers.pop(vid)
         subs.pop(vid, None)
@@ -941,13 +1040,14 @@ async def on_message(message: discord.Message):
         old = await db.links.find_one({"_id": cid})
         if old:
             if int(old.get("discord_id", 0)) == message.author.id:
-                await message.channel.send(
+                notice = await message.channel.send(
                     f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với Discord của bạn."
                 )
             else:
-                await message.channel.send(
+                notice = await message.channel.send(
                     f"{message.author.mention}, kênh {au['displayName']} đã được liên kết với một tài khoản Discord khác."
                 )
+            schedule_message_delete(notice, 5)
             return
 
         code = "YT-" + "".join(
@@ -2062,7 +2162,7 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
     await inter.followup.send(msg[:1990])
 
 
-@bot.tree.command(name="kenhthongbao", description="Chọn kênh Discord nhận thông báo live và donate (admin)")
+@bot.tree.command(name="kenhthongbao", description="Chọn kênh Discord nhận thông báo live và video mới (admin)")
 @app_commands.describe(kenh="Chọn kênh từ danh sách gợi ý. Bỏ trống = dùng kênh bạn đang gõ lệnh")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2073,7 +2173,31 @@ async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel
         return
     await inter.response.defer(ephemeral=True)
     await db.guilds.update_one({"_id": inter.guild_id}, {"$set": {"announce": kenh.id}}, upsert=True)
-    await inter.followup.send(f"Đã đặt kênh thông báo của server này: {kenh.mention}")
+    await inter.followup.send(f"Đã đặt kênh nhận thông báo live/video mới: {kenh.mention}")
+
+
+@bot.tree.command(name="kenhthongbaodonate", description="Chọn kênh Discord chỉ nhận thông báo donate (admin)")
+@app_commands.describe(kenh="Kênh văn bản nhận thông báo donate")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def kenhthongbaodonate_cmd(inter: discord.Interaction, kenh: discord.TextChannel):
+    if not inter.user.guild_permissions.manage_guild:
+        await inter.response.send_message("Bạn cần quyền Quản lý máy chủ để dùng lệnh này.", ephemeral=True)
+        return
+    me = inter.guild.get_member(bot.user.id) if inter.guild and bot.user else None
+    perms = kenh.permissions_for(me) if me else None
+    if not perms or not perms.view_channel or not perms.send_messages or not perms.embed_links:
+        await inter.response.send_message(
+            "Jion cần quyền Xem kênh, Gửi tin nhắn và Nhúng liên kết trong kênh đó.",
+            ephemeral=True,
+        )
+        return
+    await db.guilds.update_one(
+        {"_id": inter.guild_id}, {"$set": {"donation_announce": kenh.id}}, upsert=True
+    )
+    await inter.response.send_message(
+        f"Đã đặt {kenh.mention} làm kênh chỉ nhận thông báo donate.", ephemeral=True
+    )
 
 
 @bot.tree.command(name="gankenh", description="Gán donate chưa phân kênh (hoặc một khoản/lô) vào một kênh (admin)")
@@ -2112,6 +2236,13 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
         return
     await db.streamers.update_one({"_id": au["channelId"]}, {"$set": {"name": au["displayName"]}}, upsert=True)
     await db.guilds.update_one({"_id": inter.guild_id}, {"$addToSet": {"yt": au["channelId"]}}, upsert=True)
+    recent = await fetch_channel_videos(au["channelId"])
+    if recent:
+        await db.feed_state.update_one(
+            {"_id": f"{inter.guild_id}:{au['channelId']}"},
+            {"$setOnInsert": {"video_id": recent[0]["video_id"]}},
+            upsert=True,
+        )
 
     status = (
         f"Đã đăng ký tự động theo dõi live của **{au['displayName']}**. "
