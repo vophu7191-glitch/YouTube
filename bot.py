@@ -2112,10 +2112,32 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
         return
     await db.streamers.update_one({"_id": au["channelId"]}, {"$set": {"name": au["displayName"]}}, upsert=True)
     await db.guilds.update_one({"_id": inter.guild_id}, {"$addToSet": {"yt": au["channelId"]}}, upsert=True)
-    await inter.followup.send(
-        f"Server này sẽ tự theo dõi live của **{au['displayName']}** (donate được ghi riêng cho server này). "
-        "Muốn theo dõi một live cụ thể ngay thì dùng `/watch`."
+
+    status = (
+        f"Đã đăng ký tự động theo dõi live của **{au['displayName']}**. "
+        "Bot sẽ tiếp tục dò live mới mỗi 60 giây."
     )
+    try:
+        live = await find_live_chats([au["channelId"]])
+        if live:
+            for vid, info in live.items():
+                subs.setdefault(vid, set()).add(inter.guild_id)
+                vinfo[vid] = info
+                task = watchers.get(vid)
+                if not task or task.done():
+                    watchers[vid] = asyncio.create_task(watch_chat(vid, info["chat"], info))
+                    log.info("Bắt đầu theo dõi live ngay sau /theodoikenh: %s", vid)
+                err = await announce_live(vid, info, "tự động", inter.guild_id)
+                if err:
+                    status += f"\\n⚠️ Đã tìm thấy live nhưng không gửi được thông báo: {err}"
+                else:
+                    status += f"\\n🔴 Đã tìm thấy live **{info['title']}** và bắt đầu đọc Live Chat."
+        else:
+            status += "\\nHiện kênh chưa có live đang hoạt động; bot sẽ tự phát hiện khi kênh bắt đầu live."
+    except Exception:
+        log.exception("Không kiểm tra được live ngay sau /theodoikenh")
+        status += "\\n⚠️ Chưa kiểm tra được live ngay lúc này; bot vẫn sẽ tiếp tục dò tự động."
+    await inter.followup.send(status)
 
 
 @bot.tree.command(name="huytheodoi", description="Ngừng tự động theo dõi một kênh YouTube trong server này (admin)")
