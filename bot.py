@@ -2230,12 +2230,12 @@ async def top_cmd(
     limit: app_commands.Range[int, 1, 10] = 10,
 ):
     gid = inter.guild_id
+    await inter.response.defer()
     sc, err = await pick_streamer(gid, kenh, for_view=True)
     if err:
-        await inter.response.send_message(err, ephemeral=True)
+        await inter.followup.send(err, ephemeral=True)
         return
     sid, sname = sc
-    await inter.response.defer()
     rows = await db.donations.aggregate([
         {"$match": rank_match(gid, sid)},
         {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
