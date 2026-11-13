@@ -242,7 +242,7 @@ async def get_announce_channel(gid: int):
     return ch
 
 
-async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content") -> str | None:
+async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content", return_message: bool = False) -> str | discord.Message | None:
     """Gửi thông báo video/live hoặc donate vào kênh riêng của từng loại."""
     cfg = await guild_cfg(gid)
     channel_id = cfg.get("donation_announce") if purpose == "donate" else (
@@ -259,7 +259,8 @@ async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content") 
         command = "/set-kênh-thông-báo-donate" if purpose == "donate" else "/set-kênh-thông-báo"
         return f"chưa đặt kênh thông báo (dùng {command}) hoặc bot không thấy kênh đó"
     try:
-        await ch.send(embed=embed)
+        message = await ch.send(embed=embed)
+        return message if return_message else None
     except discord.Forbidden:
         return f"bot thiếu quyền Send Messages / Embed Links trong {ch.mention}"
     except discord.HTTPException as ex:
@@ -467,10 +468,11 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
     vnd = int(jewels * JEWEL_RATE_VND)
     name = g.get("giftName") or "quà"
     note = f"🎁 {name}" + (f" x{combo}" if combo > 1 else "")
-    new = []
+    donation_ids = []
     for gid in gids:
-        res = await db.donations.update_one(
-            {"_id": f"{gid}:{item['id']}"},
+        donation_id = f"{gid}:{item['id']}"
+        await db.donations.update_one(
+            {"_id": donation_id},
             {
                 "$set": {"amount": jewels, "vnd": vnd, "comment": note},
                 "$setOnInsert": {
@@ -481,18 +483,17 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
             },
             upsert=True,
         )
-        if res.upserted_id is not None:  # chỉ báo lần đầu, các lần combo sau chỉ cập nhật
-            new.append(gid)
-    if not new:
+        donation_ids.append((gid, donation_id))
+    if not donation_ids:
         return
     await ensure_channel(au)
-    log.info("Quà %s Ngọc từ %s (%d server)", jewels, au["displayName"], len(new))
+    log.info("Quà %s Ngọc từ %s (%d server)", jewels, au["displayName"], len(donation_ids))
     d = {"amountDisplayString": f"{jewels:,} Ngọc", "userComment": note, "currency": "JEWEL"}
-    for gid in new:
-        await announce(gid, au, d, vnd, info)
+    for gid, donation_id in donation_ids:
+        await announce(gid, au, d, vnd, info, donation_id=donation_id)
 
 
-async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = None):
+async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = None, donation_id: str | None = None):
     info = await db.channels.find_one({"_id": au["channelId"]}) or {}
     link = await db.links.find_one({"_id": au["channelId"]})
     who = f"<@{link['discord_id']}>" if link else (info.get("handle") or au["displayName"])
@@ -519,9 +520,44 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     if stream and stream.get("channel"):
         footer += f" • Live: {stream['channel']}"
     e.set_footer(text=footer)
-    err = await send_notice(gid, e, purpose="donate")
-    if err:
-        log.warning("Không báo được donate (server %s): %s", gid, err)
+    if donation_id:
+        saved = await db.donations.find_one(
+            {"_id": donation_id}, {"announce_channel_id": 1, "announce_message_id": 1}
+        ) or {}
+        channel_id = saved.get("announce_channel_id")
+        message_id = saved.get("announce_message_id")
+        if channel_id and message_id:
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await bot.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    channel = None
+            if channel:
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.edit(embed=e)
+                    return
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as ex:
+                    log.warning("Không cập nhật được thông báo quà Ngọc (%s): %s", donation_id, ex)
+                    return
+        sent = await send_notice(gid, e, purpose="donate", return_message=True)
+        if isinstance(sent, discord.Message):
+            await db.donations.update_one(
+                {"_id": donation_id},
+                {"$set": {
+                    "announce_channel_id": sent.channel.id,
+                    "announce_message_id": sent.id,
+                }},
+            )
+        elif sent:
+            log.warning("Không báo được quà Ngọc (server %s): %s", gid, sent)
+    else:
+        err = await send_notice(gid, e, purpose="donate")
+        if err:
+            log.warning("Không báo được donate (server %s): %s", gid, err)
 
 
 async def watch_chat(video_id: str, chat_id: str, info: dict):
@@ -997,7 +1033,8 @@ async def publish_verified_member(guild_id: int | None, discord_id: int, au: dic
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_author(name=display_name, icon_url=avatar)
-    try:        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         log.exception("Không đăng được thành viên đã xác minh vào kênh %s", channel_id)
 
