@@ -2113,34 +2113,40 @@ async def top_cmd(
         await inter.followup.send(f"Chưa có donate nào ở kênh **{sname}**.")
         return
 
-    embed = discord.Embed(
-        title="🏆 TOP DONATE",
-        description=f"Kênh **{sname}**",
-        color=discord.Color.blurple(),
-    )
+    embeds = []
     medals = ["🥇", "🥈", "🥉"]
     for index, row in enumerate(rows):
         cid = row["_id"]
+        avatar_url = None
         if cid.startswith("dc:"):
             did = int(cid[3:])
             try:
                 user = await bot.fetch_user(did)
                 label = f"@{user.name}"
+                avatar_url = user.display_avatar.url
             except discord.HTTPException:
                 label = str(did)
         else:
             info = await db.channels.find_one({"_id": cid}) or {}
             label = info.get("handle") or info.get("name") or cid
+            avatar_url = info.get("avatar")
 
-        rank = medals[index] if index < len(medals) else f"**#{index + 1}**"
-        embed.add_field(
-            name=f"{rank} {label[:240]}",
-            value=f"**{int(row['total']):,}₫** · {int(row['count'])} lượt donate",
-            inline=False,
+        rank = medals[index] if index < len(medals) else f"#{index + 1}"
+        embed = discord.Embed(
+            title="🏆 TOP DONATE" if index == 0 else None,
+            description=f"Kênh **{sname}**" if index == 0 else None,
+            color=discord.Color.blurple(),
         )
+        embed.set_author(name=f"{rank} {label[:240]}", icon_url=avatar_url)
+        embed.description = (
+            (embed.description + "\\n" if embed.description else "")
+            + f"**{int(row['total']):,}₫** · {int(row['count'])} lượt donate"
+        )
+        if index == len(rows) - 1:
+            embed.set_footer(text="Bảng xếp hạng donate")
+        embeds.append(embed)
 
-    embed.set_footer(text="Bảng xếp hạng donate")
-    send_args = {"embed": embed, "allowed_mentions": NO_PING}
+    send_args = {"embeds": embeds, "allowed_mentions": NO_PING}
     donors, total = await rank_summary(gid, sid)
     if donors > limit:
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
