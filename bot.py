@@ -2123,13 +2123,12 @@ async def top_cmd(
         return
 
     medals = ["🥇", "🥈", "🥉"]
-    embeds = []
-    for title, rows, unit, field_suffix in (
-        ("💰 TOP DONATE", money_rows, "₫", "lượt donate"),
-        ("💎 TOP JEWELS · NGỌC THỰC NHẬN", jewel_rows, " Ngọc", "lượt gửi quà"),
+    money_embeds, jewel_embeds = [], []
+    for title, rows, is_jewel in (
+        ("💰 TOP DONATE", money_rows, False),
+        ("💎 TOP JEWELS · NGỌC THỰC NHẬN", jewel_rows, True),
     ):
-        if not rows:
-            continue
+        target = jewel_embeds if is_jewel else money_embeds
         for index, row in enumerate(rows):
             cid = row["_id"]
             avatar_url = None
@@ -2147,28 +2146,29 @@ async def top_cmd(
                 avatar_url = info.get("avatar")
 
             rank = medals[index] if index < len(medals) else f"#{index + 1}"
+            total = int(row["total"])
+            amount = f"{total:,} Ngọc" if is_jewel else f"{total:,}₫"
             embed = discord.Embed(
                 title=title if index == 0 else None,
-                description=f"Kênh **{sname}**" if index == 0 else None,
-                color=discord.Color.gold() if unit == "₫" else discord.Color.purple(),
+                description=f"Kênh **{sname}**\n**{amount}** · {int(row['count'])} {'lượt gửi quà' if is_jewel else 'lượt donate'}",
+                color=discord.Color.purple() if is_jewel else discord.Color.gold(),
             )
             embed.set_author(name=f"{rank} {label[:240]}", icon_url=avatar_url)
-            total = int(row["total"])
-            amount = f"{total:,}{unit}" if unit == "₫" else f"{total:,} Ngọc"
-            embed.description = (
-                (embed.description + "\\n" if embed.description else "")
-                + f"**{amount}** · {int(row['count'])} {field_suffix}"
-            )
             if index == len(rows) - 1:
-                embed.set_footer(text="Số Ngọc là lượng thực nhận, không quy đổi vào tiền donate" if unit != "₫" else "Bảng xếp hạng tiền donate")
-            embeds.append(embed)
+                embed.set_footer(
+                    text="Số Ngọc là lượng thực nhận, không quy đổi vào tiền donate"
+                    if is_jewel else "Bảng xếp hạng tiền donate"
+                )
+            target.append(embed)
 
     donors, total = await rank_summary(gid, sid)
+    view = None
     if donors > limit:
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
-        await inter.followup.send(embeds=embeds, view=view, allowed_mentions=NO_PING)
-    else:
-        await inter.followup.send(embeds=embeds, allowed_mentions=NO_PING)
+    if money_embeds:
+        await inter.followup.send(embeds=money_embeds, view=view, allowed_mentions=NO_PING)
+    if jewel_embeds:
+        await inter.followup.send(embeds=jewel_embeds, allowed_mentions=NO_PING)
 
 
 @bot.tree.command(name="theo-dõi-live", description="Theo dõi thủ công một live stream (admin)")
