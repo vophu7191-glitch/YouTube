@@ -2139,7 +2139,7 @@ async def top_cmd(
         )
         embed.set_author(name=f"{rank} {label[:240]}", icon_url=avatar_url)
         embed.description = (
-            (embed.description + "\\n" if embed.description else "")
+            (embed.description + "\n" if embed.description else "")
             + f"**{int(row['total']):,}₫** · {int(row['count'])} lượt donate"
         )
         if index == len(rows) - 1:
