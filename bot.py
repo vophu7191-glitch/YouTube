@@ -2166,8 +2166,11 @@ async def top_cmd(
     if donors > limit:
         view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
     if money_embeds:
-        message = await inter.followup.send(embeds=money_embeds, view=view, allowed_mentions=NO_PING)
-        if view:
+        send_args = {"embeds": money_embeds, "allowed_mentions": NO_PING}
+        if view is not None:
+            send_args["view"] = view
+        message = await inter.followup.send(**send_args)
+        if view is not None:
             view.message = message
     if jewel_embeds:
         await inter.followup.send(embeds=jewel_embeds, allowed_mentions=NO_PING)
