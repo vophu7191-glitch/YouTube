@@ -9,6 +9,9 @@ import re
 import secrets
 import string
 import uuid
+import json
+import tempfile
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -2209,6 +2212,188 @@ async def watch_cmd(inter: discord.Interaction, video: str):
     err = await announce_live(vid, info, f"thủ công, bởi {inter.user.display_name}", gid, force=True)
     note = f"\n⚠️ Chưa gửi được thông báo: {err}" if err else "\n📣 Đã gửi thông báo vào kênh thông báo."
     await inter.followup.send(f"{status} live **{info['title']}** (`{vid}`).{note}")
+
+
+def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
+    """Tải Live Chat Replay công khai bằng yt-dlp; không tải video."""
+    from yt_dlp import YoutubeDL
+
+    with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
+        opts = {
+            "skip_download": True,
+            "writesubtitles": True,
+            "subtitleslangs": ["live_chat"],
+            "subtitlesformat": "json",
+            "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "ignoreerrors": False,
+            "socket_timeout": 20,
+            "retries": 2,
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+        files = list(Path(temp_dir).glob("*.live_chat.json"))
+        if not files:
+            files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
+        if not files:
+            raise ValueError("Video không có Live Chat Replay công khai hoặc YouTube không cung cấp replay.")
+        raw = json.loads(files[0].read_text(encoding="utf-8"))
+        return info, raw if isinstance(raw, list) else raw.get("events", [])
+
+
+def _replay_paid_events(events: list[dict]) -> list[dict]:
+    """Chuẩn hoá các Super Chat/Sticker renderer trong JSON replay."""
+    paid = []
+    for event in events:
+        actions = event.get("replayChatItemAction", {}).get("actions", [])
+        for action in actions:
+            item = action.get("addChatItemAction", {}).get("item", {})
+            renderer = item.get("liveChatPaidMessageRenderer") or item.get("liveChatPaidStickerRenderer")
+            if not renderer:
+                continue
+            author_id = renderer.get("authorExternalChannelId")
+            author_name = (renderer.get("authorName") or {}).get("simpleText") or "YouTube user"
+            amount_text = (renderer.get("purchaseAmountText") or {}).get("simpleText") or ""
+            paid.append({
+                "id": renderer.get("id") or hashlib.sha256(
+                    json.dumps(renderer, sort_keys=True, ensure_ascii=False).encode()
+                ).hexdigest(),
+                "author_id": author_id,
+                "author_name": author_name,
+                "amount_text": amount_text,
+                "comment": " ".join(
+                    run.get("text", "") for run in renderer.get("message", {}).get("runs", [])
+                ),
+                "timestamp_usec": action.get("timestampUsec") or event.get("videoOffsetTimeMsec"),
+                "avatar": next(iter((renderer.get("authorPhoto") or {}).get("thumbnails", [])), {}).get("url"),
+                "kind": "superSticker" if "liveChatPaidStickerRenderer" in item else "superChat",
+            })
+    return paid
+
+
+def _parse_replay_amount(value: str) -> tuple[float, str] | None:
+    """Chỉ nhận diện tiền tệ có ký hiệu rõ ràng; không đoán loại tiền."""
+    symbols = {
+        "$": "USD", "US$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY",
+        "₫": "VND", "₹": "INR", "R$": "BRL", "₩": "KRW", "฿": "THB",
+        "S$": "SGD", "A$": "AUD", "C$": "CAD", "₱": "PHP", "RM": "MYR",
+        "NT$": "TWD", "HK$": "HKD", "₽": "RUB", "₺": "TRY", "zł": "PLN",
+        "kr": "SEK",
+    }
+    currency = next((cur for symbol, cur in sorted(symbols.items(), key=lambda x: -len(x[0])) if symbol in value), None)
+    if not currency:
+        return None
+    number = re.search(r"[0-9][0-9.,\\s]*", value)
+    if not number:
+        return None
+    raw = number.group(0).replace(" ", "")
+    if "," in raw and "." in raw:
+        raw = raw.replace(",", "") if raw.rfind(".") > raw.rfind(",") else raw.replace(".", "").replace(",", ".")
+    elif "," in raw:
+        tail = raw.rsplit(",", 1)[-1]
+        raw = raw.replace(",", ".") if len(tail) in (1, 2) else raw.replace(",", "")
+    elif "." in raw:
+        tail = raw.rsplit(".", 1)[-1]
+        if len(tail) == 3:
+            raw = raw.replace(".", "")
+    try:
+        amount = float(raw)
+    except ValueError:
+        return None
+    return (amount, currency) if amount > 0 and currency in RATES_VND else None
+
+
+@bot.tree.command(name="khoi-phuc-live", description="Thử khôi phục Super Chat/Sticker từ Live Chat Replay (admin)")
+@app_commands.describe(video="Link hoặc ID video live đã kết thúc", kenh="Kênh YouTube được donate")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | None = None):
+    await inter.response.defer(ephemeral=True, thinking=True)
+    match = re.search(r"(?:v=|youtu\\.be/|live/)([\\w-]{11})", video)
+    video_id = match.group(1) if match else video.strip()
+    if not re.fullmatch(r"[\\w-]{11}", video_id):
+        await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
+        return
+    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
+    if err:
+        await inter.followup.send(err, ephemeral=True)
+        return
+    stream_id, stream_name = sc
+    try:
+        info, events = await asyncio.to_thread(
+            _download_live_chat_replay, f"https://www.youtube.com/watch?v={video_id}"
+        )
+    except Exception as exc:
+        log.warning("Không tải được Live Chat Replay %s: %s", video_id, exc)
+        await inter.followup.send(
+            "Không lấy được Live Chat Replay. Video có thể đã tắt replay, không công khai hoặc YouTube không cung cấp dữ liệu. "
+            "Lệnh này dùng yt-dlp nên có thể ngừng hoạt động nếu YouTube thay đổi.",
+            ephemeral=True,
+        )
+        return
+
+    video_channel = info.get("channel_id")
+    if video_channel and stream_id not in (video_channel, UNASSIGNED):
+        await inter.followup.send(
+            f"Video thuộc kênh **{info.get('channel') or video_channel}**, không khớp kênh **{stream_name}** bạn chọn. Chưa ghi dữ liệu.",
+            ephemeral=True,
+        )
+        return
+
+    paid = _replay_paid_events(events)
+    inserted = skipped = unknown = 0
+    for item in paid:
+        if not item["author_id"]:
+            unknown += 1
+            continue
+        parsed = _parse_replay_amount(item["amount_text"])
+        if not parsed:
+            unknown += 1
+            continue
+        amount, currency = parsed
+        vnd = int(amount * RATES_VND[currency])
+        try:
+            ts = int(item["timestamp_usec"])
+            at = datetime.fromtimestamp(ts / 1_000_000, timezone.utc) if ts > 10**12 else datetime.now(timezone.utc)
+        except (TypeError, ValueError, OSError):
+            at = datetime.now(timezone.utc)
+        donation_id = f"replay:{inter.guild_id}:{video_id}:{item['id']}"
+        result = await db.donations.update_one(
+            {"_id": donation_id},
+            {"$setOnInsert": {
+                "guild_id": inter.guild_id, "channel_id": item["author_id"],
+                "video_id": video_id, "stream_channel": stream_id,
+                "amount": amount, "currency": currency, "vnd": vnd,
+                "comment": item["comment"] or item["kind"], "at": at,
+                "recovered_from_replay": True, "replay_amount_text": item["amount_text"],
+            }},
+            upsert=True,
+        )
+        if result.upserted_id:
+            inserted += 1
+            author = {
+                "channelId": item["author_id"], "displayName": item["author_name"],
+                "profileImageUrl": item["avatar"],
+            }
+            await db.channels.update_one(
+                {"_id": item["author_id"]},
+                {"$set": {"name": item["author_name"], "avatar": item["avatar"]}},
+                upsert=True,
+            )
+        else:
+            skipped += 1
+
+    await inter.followup.send(
+        f"**Khôi phục Live Chat Replay: {info.get('title') or video_id}**\\n"
+        f"• Tìm thấy Super Chat/Sticker: **{len(paid)}**\\n"
+        f"• Thêm mới: **{inserted}**\\n"
+        f"• Đã có, bỏ qua trùng: **{skipped}**\\n"
+        f"• Không đủ dữ liệu để ghi: **{unknown}**\\n"
+        "Chỉ khôi phục giao dịch có ID kênh người gửi và loại tiền nhận diện được. Jewels chưa được khôi phục từ replay.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="thêm-donate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
