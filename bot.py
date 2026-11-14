@@ -2285,7 +2285,7 @@ def _parse_replay_amount(value: str) -> tuple[float, str] | None:
     currency = next((cur for symbol, cur in sorted(symbols.items(), key=lambda x: -len(x[0])) if symbol in value), None)
     if not currency:
         return None
-    number = re.search(r"[0-9][0-9.,\\s]*", value)
+    number = re.search(r"[0-9][0-9.,\s]*", value)
     if not number:
         return None
     raw = number.group(0).replace(" ", "")
@@ -2311,9 +2311,9 @@ def _parse_replay_amount(value: str) -> tuple[float, str] | None:
 @app_commands.guild_only()
 async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | None = None):
     await inter.response.defer(ephemeral=True, thinking=True)
-    match = re.search(r"(?:v=|youtu\\.be/|live/)([\\w-]{11})", video)
+    match = re.search(r"(?:v=|youtu\.be/|live/)([\w-]{11})", video)
     video_id = match.group(1) if match else video.strip()
-    if not re.fullmatch(r"[\\w-]{11}", video_id):
+    if not re.fullmatch(r"[\w-]{11}", video_id):
         await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
         return
     sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
