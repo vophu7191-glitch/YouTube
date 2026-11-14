@@ -2215,11 +2215,17 @@ async def watch_cmd(inter: discord.Interaction, video: str):
 
 
 def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
-    """Tải Live Chat Replay bằng yt-dlp; thử một cấu hình player khác nếu YouTube trả response rỗng."""
+    """Tải Live Chat Replay; thử lần lượt các player client khi YouTube không trả player response."""
     from yt_dlp import YoutubeDL
 
-    attempts = ({}, {"extractor_args": {"youtube": {"player_client": ["web", "mweb", "tv"]}}})
-    last_error = None
+    attempts = (
+        {},
+        {"extractor_args": {"youtube": {"player_client": ["web", "mweb", "tv"]}}},
+        {"extractor_args": {"youtube": {"player_client": ["web_safari"]}}},
+        {"extractor_args": {"youtube": {"player_client": ["android"]}}},
+        {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
+    )
+    errors = []
 
     for attempt, extra in enumerate(attempts, start=1):
         with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
@@ -2234,30 +2240,36 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
                 "noplaylist": True,
                 "ignoreerrors": False,
                 "socket_timeout": 20,
-                "retries": 2,
+                "retries": 1,
                 **extra,
             }
             try:
                 with YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(video_url, download=True)
+
+                files = list(Path(temp_dir).glob("*.live_chat.json"))
+                if not files:
+                    files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
+                if not files:
+                    raise ValueError("yt-dlp không tạo tệp live_chat.json dù đã đọc được thông tin video.")
+
+                raw = json.loads(files[0].read_text(encoding="utf-8"))
+                events = raw if isinstance(raw, list) else raw.get("events", [])
+                if not isinstance(events, list):
+                    raise ValueError("Dữ liệu Live Chat Replay không đúng định dạng JSON.")
+                return info, events
             except Exception as exc:
-                last_error = exc
-                message = str(exc).lower()
-                if attempt == 1 and "failed to extract any player response" in message:
-                    log.warning("yt-dlp không lấy được player response; thử player_client dự phòng.")
-                    continue
-                raise
+                errors.append(f"lần {attempt}: {type(exc).__name__}: {exc}")
+                log.warning(
+                    "Live Chat Replay thất bại ở cấu hình %s/%s: %s",
+                    attempt, len(attempts), str(exc)[:250],
+                )
 
-            files = list(Path(temp_dir).glob("*.live_chat.json"))
-            if not files:
-                files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
-            if not files:
-                raise ValueError("yt-dlp không tạo được tệp Live Chat Replay; video có thể không cung cấp replay.")
-            raw = json.loads(files[0].read_text(encoding="utf-8"))
-            return info, raw if isinstance(raw, list) else raw.get("events", [])
-
-    raise RuntimeError(f"Không tải được Live Chat Replay sau cấu hình dự phòng: {last_error}")
-
+    details = " | ".join(errors[-3:])
+    raise RuntimeError(
+        "Không tải được Live Chat Replay sau khi thử các player client dự phòng. "
+        "YouTube có thể đang chặn request từ máy chủ hoặc thay đổi player. " + details
+    )
 
 def _replay_paid_events(events: list[dict]) -> list[dict]:
     """Chuẩn hoá các Super Chat/Sticker renderer trong JSON replay."""
