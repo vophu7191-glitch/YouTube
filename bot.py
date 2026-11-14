@@ -2757,4 +2757,9 @@ async def streamer_autocomplete(inter: discord.Interaction, current: str):
 
 
 if __name__ == "__main__":
+    try:
+        from importlib.metadata import version
+        log.info("yt-dlp version: %s", version("yt-dlp"))
+    except Exception:
+        log.exception("Không xác định được phiên bản yt-dlp")
     bot.run(TOKEN)
