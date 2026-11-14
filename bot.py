@@ -1967,7 +1967,7 @@ def rank_match(gid: int, sid: str) -> dict:
     return {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}
 
 
-async def rank_pipeline(gid: int, sid: str) -> list[dict]:
+def rank_pipeline(gid: int, sid: str) -> list[dict]:
     return [
         {"$match": rank_match(gid, sid)},
         {"$group": {
