@@ -2215,32 +2215,48 @@ async def watch_cmd(inter: discord.Interaction, video: str):
 
 
 def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
-    """Tải Live Chat Replay công khai bằng yt-dlp; không tải video."""
+    """Tải Live Chat Replay bằng yt-dlp; thử một cấu hình player khác nếu YouTube trả response rỗng."""
     from yt_dlp import YoutubeDL
 
-    with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
-        opts = {
-            "skip_download": True,
-            "writesubtitles": True,
-            "subtitleslangs": ["live_chat"],
-            "subtitlesformat": "json",
-            "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "ignoreerrors": False,
-            "socket_timeout": 20,
-            "retries": 2,
-        }
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-        files = list(Path(temp_dir).glob("*.live_chat.json"))
-        if not files:
-            files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
-        if not files:
-            raise ValueError("Video không có Live Chat Replay công khai hoặc YouTube không cung cấp replay.")
-        raw = json.loads(files[0].read_text(encoding="utf-8"))
-        return info, raw if isinstance(raw, list) else raw.get("events", [])
+    attempts = ({}, {"extractor_args": {"youtube": {"player_client": ["web", "mweb", "tv"]}}})
+    last_error = None
+
+    for attempt, extra in enumerate(attempts, start=1):
+        with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
+            opts = {
+                "skip_download": True,
+                "writesubtitles": True,
+                "subtitleslangs": ["live_chat"],
+                "subtitlesformat": "json",
+                "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "ignoreerrors": False,
+                "socket_timeout": 20,
+                "retries": 2,
+                **extra,
+            }
+            try:
+                with YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if attempt == 1 and "failed to extract any player response" in message:
+                    log.warning("yt-dlp không lấy được player response; thử player_client dự phòng.")
+                    continue
+                raise
+
+            files = list(Path(temp_dir).glob("*.live_chat.json"))
+            if not files:
+                files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
+            if not files:
+                raise ValueError("yt-dlp không tạo được tệp Live Chat Replay; video có thể không cung cấp replay.")
+            raw = json.loads(files[0].read_text(encoding="utf-8"))
+            return info, raw if isinstance(raw, list) else raw.get("events", [])
+
+    raise RuntimeError(f"Không tải được Live Chat Replay sau cấu hình dự phòng: {last_error}")
 
 
 def _replay_paid_events(events: list[dict]) -> list[dict]:
@@ -2326,12 +2342,20 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
             _download_live_chat_replay, f"https://www.youtube.com/watch?v={video_id}"
         )
     except Exception as exc:
-        log.warning("Không tải được Live Chat Replay %s: %s", video_id, exc)
-        await inter.followup.send(
-            "Không lấy được Live Chat Replay. Video có thể đã tắt replay, không công khai hoặc YouTube không cung cấp dữ liệu. "
-            "Lệnh này dùng yt-dlp nên có thể ngừng hoạt động nếu YouTube thay đổi.",
-            ephemeral=True,
-        )
+        error_text = str(exc)
+        log.warning("Không tải được Live Chat Replay %s: %s", video_id, error_text[:500])
+        if "failed to extract any player response" in error_text.lower():
+            message = (
+                "YouTube không trả dữ liệu player cho yt-dlp từ máy chủ Render, kể cả sau lần thử cấu hình dự phòng. "
+                "Điều này **không chứng minh video đã tắt Live Chat Replay**; có thể YouTube đang giới hạn request hoặc thay đổi hệ thống player. "
+                "Bot chưa ghi dữ liệu nào. Hãy thử lại sau."
+            )
+        else:
+            message = (
+                "Không đọc được Live Chat Replay bằng yt-dlp. Lỗi: "
+                f"`{error_text[:250]}`. Điều này chưa đủ để kết luận video đã tắt replay. Bot chưa ghi dữ liệu nào."
+            )
+        await inter.followup.send(message, ephemeral=True)
         return
 
     video_channel = info.get("channel_id")
