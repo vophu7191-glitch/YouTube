@@ -1967,25 +1967,36 @@ def rank_match(gid: int, sid: str) -> dict:
     return {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}
 
 
+async def rank_pipeline(gid: int, sid: str) -> list[dict]:
+    return [
+        {"$match": rank_match(gid, sid)},
+        {"$group": {
+            "_id": "$channel_id",
+            "money": {"$sum": {"$cond": [{"$ne": ["$currency", "JEWEL"]}, "$vnd", 0]}},
+            "jewels": {"$sum": {"$cond": [{"$eq": ["$currency", "JEWEL"]}, "$amount", 0]}},
+            "jewel_vnd": {"$sum": {"$cond": [{"$eq": ["$currency", "JEWEL"]}, "$vnd", 0]}},
+            "money_count": {"$sum": {"$cond": [{"$ne": ["$currency", "JEWEL"]}, 1, 0]}},
+            "jewel_count": {"$sum": {"$cond": [{"$eq": ["$currency", "JEWEL"]}, 1, 0]}},
+            "count": {"$sum": 1},
+        }},
+        {"$addFields": {"total": {"$add": ["$money", "$jewel_vnd"]}}},
+        {"$sort": {"total": -1, "_id": 1}},
+    ]
+
+
 async def rank_summary(gid: int, sid: str) -> tuple[int, int]:
-    """(số người đã donate tiền, tổng tiền VND); không gộp Jewels."""
-    r = await db.donations.aggregate([
-        {"$match": {**rank_match(gid, sid), "currency": {"$ne": "JEWEL"}}},
-        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}}},
-        {"$group": {"_id": None, "donors": {"$sum": 1}, "sum": {"$sum": "$total"}}},
-    ]).to_list(1)
-    return (r[0]["donors"], r[0]["sum"]) if r else (0, 0)
+    rows = await db.donations.aggregate(
+        rank_pipeline(gid, sid) + [
+            {"$group": {"_id": None, "donors": {"$sum": 1}, "sum": {"$sum": "$total"}}}
+        ]
+    ).to_list(1)
+    return (rows[0]["donors"], rows[0]["sum"]) if rows else (0, 0)
 
 
 async def rank_page(gid: int, sid: str, skip: int, limit: int) -> list[dict]:
-    # Chỉ xếp hạng tiền donate; Jewels có bảng riêng.
-    return await db.donations.aggregate([
-        {"$match": {**rank_match(gid, sid), "currency": {"$ne": "JEWEL"}}},
-        {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
-        {"$sort": {"total": -1, "_id": 1}},
-        {"$skip": skip},
-        {"$limit": limit},
-    ]).to_list(limit)
+    return await db.donations.aggregate(
+        rank_pipeline(gid, sid) + [{"$skip": skip}, {"$limit": limit}]
+    ).to_list(limit)
 
 
 async def rank_lines(rows: list[dict], start: int) -> list[str]:
@@ -2003,7 +2014,13 @@ async def rank_lines(rows: list[dict], start: int) -> list[str]:
             who = f"[{discord.utils.escape_markdown(name)}](https://www.youtube.com/channel/{cid})"
             if cid in links:
                 who += f" • <@{links[cid]}>"
-        out.append(f"**{n}.** {who} — **{r['total']:,}₫** • {r['count']} lượt")
+        jewels = int(r.get("jewels", 0))
+        ruby = jewels // 2
+        out.append(
+            f"**{n}.** {who} — **{int(r['total']):,}₫** "
+            f"(💵 {int(r.get('money', 0)):,}₫ + 💎 {jewels:,} Jewels / 🔴 {ruby:,} Ruby) "
+            f"• {int(r['count'])} lượt"
+        )
     return out
 
 
@@ -2103,77 +2120,57 @@ async def top_cmd(
         await inter.followup.send(err, ephemeral=True)
         return
     sid, sname = sc
-    base_match = rank_match(gid, sid)
-    money_rows, jewel_rows = await asyncio.gather(
-        db.donations.aggregate([
-            {"$match": {**base_match, "currency": {"$ne": "JEWEL"}}},
-            {"$group": {"_id": "$channel_id", "total": {"$sum": "$vnd"}, "count": {"$sum": 1}}},
-            {"$sort": {"total": -1, "_id": 1}},
-            {"$limit": limit},
-        ]).to_list(limit),
-        db.donations.aggregate([
-            {"$match": {**base_match, "currency": "JEWEL"}},
-            {"$group": {"_id": "$channel_id", "total": {"$sum": "$amount"}, "count": {"$sum": 1}}},
-            {"$sort": {"total": -1, "_id": 1}},
-            {"$limit": limit},
-        ]).to_list(limit),
-    )
-    if not money_rows and not jewel_rows:
+    rows = await rank_page(gid, sid, 0, limit)
+    if not rows:
         await inter.followup.send(f"Chưa có donate nào ở kênh **{sname}**.")
         return
 
     medals = ["🥇", "🥈", "🥉"]
-    money_embeds, jewel_embeds = [], []
-    for title, rows, is_jewel in (
-        ("💰 TOP DONATE", money_rows, False),
-        ("💎 TOP JEWELS · NGỌC THỰC NHẬN", jewel_rows, True),
-    ):
-        target = jewel_embeds if is_jewel else money_embeds
-        for index, row in enumerate(rows):
-            cid = row["_id"]
-            avatar_url = None
-            if cid.startswith("dc:"):
-                did = int(cid[3:])
-                try:
-                    user = await bot.fetch_user(did)
-                    label = f"@{user.name}"
-                    avatar_url = user.display_avatar.url
-                except discord.HTTPException:
-                    label = str(did)
-            else:
-                info = await db.channels.find_one({"_id": cid}) or {}
-                label = info.get("handle") or info.get("name") or cid
-                avatar_url = info.get("avatar")
+    embeds = []
+    for index, row in enumerate(rows):
+        cid = row["_id"]
+        avatar_url = None
+        if cid.startswith("dc:"):
+            try:
+                user = await bot.fetch_user(int(cid[3:]))
+                label = f"@{user.name}"
+                avatar_url = user.display_avatar.url
+            except discord.HTTPException:
+                label = cid[3:]
+        else:
+            info = await db.channels.find_one({"_id": cid}) or {}
+            label = info.get("handle") or info.get("name") or cid
+            avatar_url = info.get("avatar")
 
-            rank = medals[index] if index < len(medals) else f"#{index + 1}"
-            total = int(row["total"])
-            amount = f"{total:,} Ngọc" if is_jewel else f"{total:,}₫"
-            embed = discord.Embed(
-                title=title if index == 0 else None,
-                description=f"Kênh **{sname}**\n**{amount}** · {int(row['count'])} {'lượt gửi quà' if is_jewel else 'lượt donate'}",
-                color=discord.Color.purple() if is_jewel else discord.Color.gold(),
-            )
-            embed.set_author(name=f"{rank} {label[:240]}", icon_url=avatar_url)
-            if index == len(rows) - 1:
-                embed.set_footer(
-                    text="Số Ngọc là lượng thực nhận, không quy đổi vào tiền donate"
-                    if is_jewel else "Bảng xếp hạng tiền donate"
-                )
-            target.append(embed)
+        money = int(row.get("money", 0))
+        jewels = int(row.get("jewels", 0))
+        ruby = jewels // 2
+        jewel_vnd = int(row.get("jewel_vnd", 0))
+        total = int(row.get("total", money + jewel_vnd))
+        lines = [
+            f"💵 **{money:,}₫** + 💎 **{jewels:,} Jewels**",
+            f"🔴 {ruby:,} Ruby (~{jewel_vnd:,}₫) • {int(row.get('jewel_count', 0))} lượt",
+            f"Chủ kênh ước tính: **{total:,}₫**",
+        ]
+        embed = discord.Embed(
+            title="🏆 TOP DONATE" if index == 0 else None,
+            description=f"Kênh **{sname}**\n" + "\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        rank = medals[index] if index < len(medals) else f"#{index + 1}"
+        embed.set_author(name=f"{rank} {label[:240]}", icon_url=avatar_url)
+        if index == len(rows) - 1:
+            embed.set_footer(text="Tiền donate + giá trị Ruby ước tính; 2 Jewels = 1 Ruby")
+        embeds.append(embed)
 
     donors, total = await rank_summary(gid, sid)
-    view = None
-    if donors > limit:
-        view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER)
-    if money_embeds:
-        send_args = {"embeds": money_embeds, "allowed_mentions": NO_PING}
-        if view is not None:
-            send_args["view"] = view
-        message = await inter.followup.send(**send_args)
-        if view is not None:
-            view.message = message
-    if jewel_embeds:
-        await inter.followup.send(embeds=jewel_embeds, allowed_mentions=NO_PING)
+    view = TopMoreView(gid, sid, sname, donors, total, first_page=limit // RANK_PER) if donors > limit else None
+    send_args = {"embeds": embeds, "allowed_mentions": NO_PING}
+    if view is not None:
+        send_args["view"] = view
+    message = await inter.followup.send(**send_args)
+    if view is not None:
+        view.message = message
 
 
 @bot.tree.command(name="theo-dõi-live", description="Theo dõi thủ công một live stream (admin)")
