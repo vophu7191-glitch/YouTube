@@ -2593,7 +2593,7 @@ async def auto_recover_live(video_id: str, info: dict):
 
 
 @bot.tree.command(name="khoi-phuc-live", description="Thử khôi phục Super Chat/Sticker từ Live Chat Replay (admin)")
-@app_commands.describe(video="Link hoặc ID video live đã kết thúc", kenh="Kênh YouTube được donate")
+@app_commands.describe(video="Link hoặc ID video live đã kết thúc", kenh="Tên kênh đã theo dõi, link hoặc @handle YouTube")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | None = None):
@@ -2603,7 +2603,7 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
     if not re.fullmatch(r"[\w-]{11}", video_id):
         await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
         return
-    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
+    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True, create=True)
     if err:
         await inter.followup.send(err, ephemeral=True)
         return
