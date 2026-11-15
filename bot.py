@@ -2432,6 +2432,102 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
     )
 
 
+def _inspect_chat_downloader_replay(video_url: str) -> dict:
+    """Đọc thử replay bằng chat-downloader; tuyệt đối không ghi MongoDB."""
+    from chat_downloader import ChatDownloader
+
+    chat = ChatDownloader().get_chat(
+        video_url,
+        message_groups=["superchat", "tickers"],
+        max_messages=3000,
+    )
+    total = 0
+    paid = 0
+    missing = {"message_id": 0, "author_id": 0, "money": 0, "timestamp": 0}
+    samples = []
+    for message in chat:
+        total += 1
+        message_type = message.get("message_type")
+        if message_type not in {
+            "paid_message", "paid_sticker",
+            "ticker_paid_message_item", "ticker_paid_sticker_item",
+        }:
+            continue
+        paid += 1
+        for key in missing:
+            if not message.get(key):
+                missing[key] += 1
+        if len(samples) < 5:
+            author_images = message.get("author_images") or []
+            samples.append({
+                "message_id": message.get("message_id"),
+                "message_type": message_type,
+                "author_id": message.get("author_id"),
+                "author_name": message.get("author_name"),
+                "money": message.get("money"),
+                "message": message.get("message"),
+                "timestamp": message.get("timestamp"),
+                "time_in_seconds": message.get("time_in_seconds"),
+                "avatar": author_images[0].get("url") if author_images else None,
+            })
+    return {"total_messages": total, "paid_messages": paid, "missing": missing, "samples": samples}
+
+
+@bot.tree.command(name="test-replay", description="Kiểm tra dữ liệu Super Chat từ replay, không ghi database")
+@app_commands.describe(video="Link hoặc ID video YouTube đã kết thúc")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def test_replay_cmd(inter: discord.Interaction, video: str):
+    await inter.response.defer(ephemeral=True, thinking=True)
+    match = re.search(r"(?:v=|youtu\\.be/|live/)([\\w-]{11})", video)
+    video_id = match.group(1) if match else video.strip()
+    if not re.fullmatch(r"[\\w-]{11}", video_id):
+        await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
+        return
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                _inspect_chat_downloader_replay,
+                f"https://www.youtube.com/watch?v={video_id}",
+            ),
+            timeout=180,
+        )
+    except asyncio.TimeoutError:
+        await inter.followup.send("Đã chờ 180 giây nhưng thư viện chưa trả kết quả. Không ghi dữ liệu nào.", ephemeral=True)
+        return
+    except Exception as exc:
+        log.warning("Chat-downloader replay test failed for %s: %s", video_id, str(exc)[:500])
+        await inter.followup.send(
+            f"Thư viện chưa đọc được replay: `{type(exc).__name__}: {str(exc)[:700]}`. Không ghi dữ liệu nào.",
+            ephemeral=True,
+        )
+        return
+
+    lines = [
+        f"**Kiểm tra replay `{video_id}`**",
+        f"• Tổng tin nhắn đã đọc: **{result['total_messages']}**",
+        f"• Super Chat/Sticker/ticker: **{result['paid_messages']}**",
+        f"• Thiếu ID tin nhắn: **{result['missing']['message_id']}**",
+        f"• Thiếu ID người gửi: **{result['missing']['author_id']}**",
+        f"• Thiếu số tiền: **{result['missing']['money']}**",
+        f"• Thiếu thời gian: **{result['missing']['timestamp']}**",
+    ]
+    for index, item in enumerate(result["samples"], 1):
+        money = item.get("money") or {}
+        lines.append(
+            f"\n**Mẫu {index} — {item.get('message_type')}**"
+            f"\nNgười gửi: {item.get('author_name') or 'không rõ'}"
+            f"\nID: `{item.get('author_id') or 'thiếu'}`"
+            f"\nTiền: {money.get('text') or 'thiếu'}"
+            f"\nID giao dịch: `{item.get('message_id') or 'thiếu'}`"
+            f"\nThời gian: {item.get('timestamp') or item.get('time_in_seconds') or 'thiếu'}"
+            f"\nAvatar: {'có' if item.get('avatar') else 'không có'}"
+        )
+    lines.append("\n**Chế độ kiểm tra:** chỉ đọc, không thêm hoặc sửa dữ liệu MongoDB.")
+    output = "\n".join(lines)
+    await inter.followup.send(output[:1900], ephemeral=True)
+
+
 @bot.tree.command(name="thêm-donate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
 @app_commands.describe(
     so_tien="Số tiền đã donate",
