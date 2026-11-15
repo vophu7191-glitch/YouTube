@@ -3,4 +3,4 @@ aiohttp>=3.9
 motor>=3.5
 dnspython>=2.6
 certifi
-yt-dlp>=2025.10.0
+yt-dlp==2026.10.26
