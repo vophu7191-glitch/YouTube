@@ -2346,7 +2346,7 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
         {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
     )
     errors = []
-    video_id_match = re.search(r"(?:v=|youtu\.be/|live/|shorts/)([\\w-]{11})", video_url)
+    video_id_match = re.search(r"(?:v=|youtu\.be/|live/|shorts/)([\w-]{11})", video_url)
     video_id = video_id_match.group(1) if video_id_match else "unknown"
     log.info("Bắt đầu tải Live Chat Replay video=%s yt-dlp=%s", video_id, version.__version__)
 
@@ -2397,7 +2397,7 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
                 else:
                     category = "extractor_error"
 
-                safe_message = re.sub(r"(?i)(cookie|authorization|token|visitor_data)(\\s*[:=]\\s*)[^\\s,;]+", r"\\1\\2[REDACTED]", message)
+                safe_message = re.sub(r"(?i)(cookie|authorization|token|visitor_data)(\s*[:=]\s*)[^\s,;]+", r"\1\2[REDACTED]", message)
                 errors.append(f"lần {attempt} [{category}]: {type(exc).__name__}: {safe_message}")
                 log.warning(
                     "Live Chat Replay lỗi video=%s attempt=%s/%s category=%s error=%s",
