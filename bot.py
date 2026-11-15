@@ -618,7 +618,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
                 )
                 if quota_interrupted:
                     await db.recovery_jobs.update_one(
-                        {"_id": video_id},
+                        {"_id": f"gap:{video_id}"},
                         {"$setOnInsert": {
                             "video_id": video_id, "channel_id": info.get("channel_id"),
                             "title": info.get("title"), "gap_start": last_success_at,
@@ -628,6 +628,7 @@ async def watch_chat(video_id: str, chat_id: str, info: dict):
                         }},
                         upsert=True,
                     )
+                await auto_recover_live(video_id, info)
                 return
             if e.reason in ("quotaExceeded", "localQuotaLimit"):
                 reset_at = quota_reset_at()
@@ -2331,6 +2332,148 @@ def _parse_replay_amount(value: str) -> tuple[float, str] | None:
     except ValueError:
         return None
     return (amount, currency) if amount > 0 and currency in RATES_VND else None
+
+
+async def auto_recover_live(video_id: str, info: dict):
+    """Tự khôi phục Super Chat/Sticker sau khi Live Chat kết thúc."""
+    stream_id = info.get("channel_id")
+    if not stream_id:
+        log.warning("Bỏ qua tự khôi phục %s: thiếu channel_id", video_id)
+        return
+
+    guild_ids = set(subs.get(video_id, set()))
+    if not guild_ids:
+        async for guild_cfg_doc in db.guilds.find({"yt": stream_id}):
+            guild_ids.add(guild_cfg_doc["_id"])
+
+    for gid in sorted(guild_ids):
+        job_id = f"{gid}:{video_id}"
+        job = await db.recovery_jobs.find_one({"_id": job_id})
+        if job and job.get("status") == "completed":
+            continue
+
+        await db.recovery_jobs.update_one(
+            {"_id": job_id},
+            {"$set": {
+                "video_id": video_id, "guild_id": gid, "channel_id": stream_id,
+                "title": info.get("title"), "status": "processing",
+                "started_at": datetime.now(timezone.utc),
+            }, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        try:
+            replay_info, events = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _download_live_chat_replay,
+                    f"https://www.youtube.com/watch?v={video_id}",
+                ),
+                timeout=240,
+            )
+            replay_channel = replay_info.get("channel_id")
+            if replay_channel and replay_channel != stream_id:
+                raise ValueError("Video Replay không khớp kênh livestream đã theo dõi.")
+
+            paid = _replay_paid_events(events)
+            inserted = skipped = unknown = 0
+            for item in paid:
+                if not item.get("author_id"):
+                    unknown += 1
+                    continue
+                parsed = _parse_replay_amount(item.get("amount_text", ""))
+                if not parsed:
+                    unknown += 1
+                    continue
+                amount, currency = parsed
+                try:
+                    ts = int(item.get("timestamp_usec") or 0)
+                    at = datetime.fromtimestamp(
+                        ts / 1_000_000 if ts > 10**12 else ts / 1000,
+                        timezone.utc,
+                    ) if ts else datetime.now(timezone.utc)
+                except (TypeError, ValueError, OSError, OverflowError):
+                    at = datetime.now(timezone.utc)
+
+                donation_id = f"replay:{gid}:{video_id}:{item['id']}"
+                result = await db.donations.update_one(
+                    {"_id": donation_id},
+                    {"$setOnInsert": {
+                        "guild_id": gid, "channel_id": item["author_id"],
+                        "video_id": video_id, "stream_channel": stream_id,
+                        "amount": amount, "currency": currency,
+                        "vnd": int(amount * RATES_VND[currency]),
+                        "comment": item.get("comment") or item.get("kind"),
+                        "at": at, "recovered_from_replay": True,
+                        "replay_amount_text": item.get("amount_text", ""),
+                    }},
+                    upsert=True,
+                )
+                if result.upserted_id:
+                    inserted += 1
+                    await db.channels.update_one(
+                        {"_id": item["author_id"]},
+                        {"$set": {
+                            "name": item.get("author_name") or "YouTube user",
+                            "avatar": item.get("avatar"),
+                        }},
+                        upsert=True,
+                    )
+                else:
+                    skipped += 1
+
+            summary = (
+                f"**Tự động khôi phục Live Chat: {info.get('title') or video_id}**\\n"
+                f"• Super Chat/Sticker tìm thấy: **{len(paid)}**\\n"
+                f"• Thêm mới: **{inserted}** • Trùng: **{skipped}**\\n"
+                f"• Không đủ dữ liệu: **{unknown}**\\n"
+                "Replay không cung cấp dữ liệu Jewels; các khoản đã lưu lúc live vẫn được giữ nguyên."
+            )
+            await db.recovery_jobs.update_one(
+                {"_id": job_id},
+                {"$set": {
+                    "status": "completed", "finished_at": datetime.now(timezone.utc),
+                    "found": len(paid), "inserted": inserted,
+                    "skipped": skipped, "unknown": unknown,
+                }},
+            )
+            sent = await send_notice(
+                gid,
+                discord.Embed(
+                    title="♻️ Khôi phục livestream hoàn tất",
+                    description=summary[:4000],
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(timezone.utc),
+                ),
+            )
+            if sent:
+                log.warning("Không gửi được kết quả khôi phục %s vào server %s: %s", video_id, gid, sent)
+            log.info("Tự khôi phục %s cho server %s: +%s, trùng %s, thiếu %s",
+                     video_id, gid, inserted, skipped, unknown)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {str(exc)[:700]}"
+            await db.recovery_jobs.update_one(
+                {"_id": job_id},
+                {"$set": {
+                    "status": "failed", "reason": reason,
+                    "finished_at": datetime.now(timezone.utc),
+                }},
+            )
+            log.warning("Tự khôi phục Replay thất bại %s (server %s): %s", video_id, gid, reason)
+            sent = await send_notice(
+                gid,
+                discord.Embed(
+                    title="⚠️ Chưa khôi phục được livestream",
+                    description=(
+                        f"Video: https://www.youtube.com/watch?v={video_id}\\n"
+                        "Bot đã tự thử Live Chat Replay nhưng YouTube chưa cung cấp dữ liệu. "
+                        "Điều này chưa chứng minh Replay đã bị tắt. Dữ liệu donate bot đã lưu trong lúc live vẫn được giữ."
+                    ),
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(timezone.utc),
+                ),
+            )
+            if sent:
+                log.warning("Không gửi được thông báo lỗi khôi phục %s vào server %s: %s", video_id, gid, sent)
 
 
 @bot.tree.command(name="khoi-phuc-live", description="Thử khôi phục Super Chat/Sticker từ Live Chat Replay (admin)")
