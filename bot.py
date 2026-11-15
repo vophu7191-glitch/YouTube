@@ -2335,8 +2335,8 @@ async def watch_cmd(inter: discord.Interaction, video: str):
 
 
 def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
-    """Tải Live Chat Replay; thử lần lượt các player client khi YouTube không trả player response."""
-    from yt_dlp import YoutubeDL
+    """Tải Live Chat Replay và ghi log chẩn đoán an toàn khi yt-dlp thất bại."""
+    from yt_dlp import YoutubeDL, version
 
     attempts = (
         {},
@@ -2346,6 +2346,9 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
         {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
     )
     errors = []
+    video_id_match = re.search(r"(?:v=|youtu\.be/|live/|shorts/)([\\w-]{11})", video_url)
+    video_id = video_id_match.group(1) if video_id_match else "unknown"
+    log.info("Bắt đầu tải Live Chat Replay video=%s yt-dlp=%s", video_id, version.__version__)
 
     for attempt, extra in enumerate(attempts, start=1):
         with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
@@ -2356,11 +2359,12 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
                 "subtitlesformat": "json",
                 "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
                 "quiet": True,
-                "no_warnings": True,
+                "no_warnings": False,
                 "noplaylist": True,
                 "ignoreerrors": False,
                 "socket_timeout": 20,
                 "retries": 1,
+                "verbose": True,
                 **extra,
             }
             try:
@@ -2377,18 +2381,38 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
                 events = raw if isinstance(raw, list) else raw.get("events", [])
                 if not isinstance(events, list):
                     raise ValueError("Dữ liệu Live Chat Replay không đúng định dạng JSON.")
+                log.info("Tải Live Chat Replay thành công video=%s events=%s", video_id, len(events))
                 return info, events
             except Exception as exc:
-                errors.append(f"lần {attempt}: {type(exc).__name__}: {exc}")
+                message = str(exc)
+                lowered = message.lower()
+                if "failed to extract any player response" in lowered:
+                    category = "player_response_missing"
+                elif any(term in lowered for term in ("http error 403", "http error 429", "too many requests")):
+                    category = "http_restricted"
+                elif any(term in lowered for term in ("timed out", "timeout", "temporary failure", "connection")):
+                    category = "network_error"
+                elif "live_chat" in lowered and any(term in lowered for term in ("not available", "no subtitles", "requested format")):
+                    category = "replay_unavailable"
+                else:
+                    category = "extractor_error"
+
+                safe_message = re.sub(r"(?i)(cookie|authorization|token|visitor_data)(\\s*[:=]\\s*)[^\\s,;]+", r"\\1\\2[REDACTED]", message)
+                errors.append(f"lần {attempt} [{category}]: {type(exc).__name__}: {safe_message}")
                 log.warning(
-                    "Live Chat Replay thất bại ở cấu hình %s/%s: %s",
-                    attempt, len(attempts), str(exc)[:250],
+                    "Live Chat Replay lỗi video=%s attempt=%s/%s category=%s error=%s",
+                    video_id, attempt, len(attempts), category, safe_message[:500],
                 )
+                if category in {"player_response_missing", "http_restricted", "network_error"}:
+                    log.warning(
+                        "Lỗi thuộc nhóm player/kết nối; thử player client dự phòng tiếp theo để đối chiếu."
+                    )
 
     details = " | ".join(errors[-3:])
     raise RuntimeError(
-        "Không tải được Live Chat Replay sau khi thử các player client dự phòng. "
-        "YouTube có thể đang chặn request từ máy chủ hoặc thay đổi player. " + details
+        "Không tải được Live Chat Replay. Xem log theo video ID để biết nhóm lỗi "
+        "(player_response_missing/http_restricted/network_error/replay_unavailable/extractor_error). "
+        + details
     )
 
 def _replay_paid_events(events: list[dict]) -> list[dict]:
