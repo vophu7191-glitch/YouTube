@@ -2418,10 +2418,10 @@ async def auto_recover_live(video_id: str, info: dict):
                     skipped += 1
 
             summary = (
-                f"**Tự động khôi phục Live Chat: {info.get('title') or video_id}**\\n"
-                f"• Super Chat/Sticker tìm thấy: **{len(paid)}**\\n"
-                f"• Thêm mới: **{inserted}** • Trùng: **{skipped}**\\n"
-                f"• Không đủ dữ liệu: **{unknown}**\\n"
+                f"**Tự động khôi phục Live Chat: {info.get('title') or video_id}**\n"
+                f"• Super Chat/Sticker tìm thấy: **{len(paid)}**\n"
+                f"• Thêm mới: **{inserted}** • Trùng: **{skipped}**\n"
+                f"• Không đủ dữ liệu: **{unknown}**\n"
                 "Replay không cung cấp dữ liệu Jewels; các khoản đã lưu lúc live vẫn được giữ nguyên."
             )
             await db.recovery_jobs.update_one(
@@ -2461,7 +2461,7 @@ async def auto_recover_live(video_id: str, info: dict):
                 discord.Embed(
                     title="⚠️ Chưa khôi phục được livestream",
                     description=(
-                        f"Video: https://www.youtube.com/watch?v={video_id}\\n"
+                        f"Video: https://www.youtube.com/watch?v={video_id}\n"
                         "Bot đã tự thử Live Chat Replay nhưng YouTube chưa cung cấp dữ liệu. "
                         "Điều này chưa chứng minh Replay đã bị tắt. Dữ liệu donate bot đã lưu trong lúc live vẫn được giữ."
                     ),
@@ -2562,11 +2562,11 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
             skipped += 1
 
     await inter.followup.send(
-        f"**Khôi phục Live Chat Replay: {info.get('title') or video_id}**\\n"
-        f"• Tìm thấy Super Chat/Sticker: **{len(paid)}**\\n"
-        f"• Thêm mới: **{inserted}**\\n"
-        f"• Đã có, bỏ qua trùng: **{skipped}**\\n"
-        f"• Không đủ dữ liệu để ghi: **{unknown}**\\n"
+        f"**Khôi phục Live Chat Replay: {info.get('title') or video_id}**\n"
+        f"• Tìm thấy Super Chat/Sticker: **{len(paid)}**\n"
+        f"• Thêm mới: **{inserted}**\n"
+        f"• Đã có, bỏ qua trùng: **{skipped}**\n"
+        f"• Không đủ dữ liệu để ghi: **{unknown}**\n"
         "Chỉ khôi phục giao dịch có ID kênh người gửi và loại tiền nhận diện được. Jewels chưa được khôi phục từ replay.",
         ephemeral=True,
     )
