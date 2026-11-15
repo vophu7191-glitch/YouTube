@@ -2386,10 +2386,7 @@ async def auto_recover_live(video_id: str, info: dict):
                 amount, currency = parsed
                 try:
                     ts = int(item.get("timestamp_usec") or 0)
-                    at = datetime.fromtimestamp(
-                        ts / 1_000_000 if ts > 10**12 else ts / 1000,
-                        timezone.utc,
-                    ) if ts else datetime.now(timezone.utc)
+                    at = datetime.fromtimestamp(ts / 1_000_000, timezone.utc) if ts > 10**12 else datetime.now(timezone.utc)
                 except (TypeError, ValueError, OSError, OverflowError):
                     at = datetime.now(timezone.utc)
 
