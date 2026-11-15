@@ -6,7 +6,7 @@ _Last updated: 16 November 2026_
 
 Jion is intended to connect Discord communities with public YouTube channel and livestream information. Depending on the features enabled, it may help server administrators maintain membership-related features, link a member's Discord identity with a YouTube channel, monitor public livestreams, and post livestream notifications.
 
-**Operator:** [Add the name of the individual or organization operating Jion]  
+**Operator:** Pov998  
 **Privacy contact:** vophu7191@gmail.com  
 **Website:** [Add the official website, if available]
 
