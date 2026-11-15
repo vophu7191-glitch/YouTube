@@ -18,7 +18,7 @@ Depending on configuration and the permissions granted, Jion may process:
 
 - Discord user IDs and server IDs.
 - Basic server membership information needed for membership-related features.
-- Discord presence information only if the Presence Intent is enabled and the feature is used.
+- Current Discord presence status (Online, Idle, Do Not Disturb, or Offline/Invisible) only if the Presence Intent is enabled. Jion keeps the current status in bot memory for display and does not write presence status or status history to its database. The user's opt-out preference is stored in the database.
 - YouTube channel IDs, public channel information, livestream titles, livestream URLs, and public livestream status.
 - Discord-to-YouTube account-link records created by a user or server administrator.
 - OAuth tokens or authorization records, if the application uses Google OAuth. These must be stored securely and used only for the scopes the user approved.
@@ -30,7 +30,7 @@ Jion should not request or store Discord, Google, or YouTube account passwords.
 
 Information is used only as needed to provide and maintain the features, such as:
 
-- Displaying or synchronizing relevant server membership information.
+- Displaying relevant server membership information and, when enabled, showing current Discord presence beside member names in the private `/trang-thai` response.
 - Associating a Discord member with a YouTube channel when that link is intentionally created.
 - Checking public YouTube livestream information.
 - Sending configured notifications about new or active livestreams.
@@ -52,9 +52,9 @@ Jion does not sell personal information. Information may be processed by infrast
 
 ## 7. Retention and deletion
 
-Jion should retain personal information only for as long as it is needed for the disclosed feature, security, or legal obligations. When a Discord-to-YouTube link is removed, the associated link data and OAuth credentials should be deleted or invalidated when no longer needed.
+Jion keeps current Presence values in temporary bot memory and does not persist Presence status or status history in its database. A user's Presence opt-out preference is stored so the choice remains effective after a restart. Jion should retain other personal information only for as long as it is needed for the disclosed feature, security, or legal obligations. When a Discord-to-YouTube link is removed, the associated link data and OAuth credentials should be deleted or invalidated when no longer needed.
 
-To request access to or deletion of information, contact **[Add a monitored contact email]**. Users can also revoke Google authorization through their Google Account settings. Revoking authorization may stop YouTube-linked features from working.
+Users can opt out of Presence display in each server with `/presence-opt-out` and opt back in with `/presence-opt-in`. The opt-out preference can be removed by opting back in. To request access to or deletion of other information, contact **[Add a monitored contact email]**. Users can also revoke Google authorization through their Google Account settings. Revoking authorization may stop YouTube-linked features from working.
 
 ## 8. Security
 
