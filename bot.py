@@ -2479,9 +2479,9 @@ def _inspect_chat_downloader_replay(video_url: str) -> dict:
 @app_commands.guild_only()
 async def test_replay_cmd(inter: discord.Interaction, video: str):
     await inter.response.defer(ephemeral=True, thinking=True)
-    match = re.search(r"(?:v=|youtu\\.be/|live/)([\\w-]{11})", video)
+    match = re.search(r"(?:v=|youtu\.be/|live/)([\w-]{11})", video)
     video_id = match.group(1) if match else video.strip()
-    if not re.fullmatch(r"[\\w-]{11}", video_id):
+    if not re.fullmatch(r"[\w-]{11}", video_id):
         await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
         return
     try:
