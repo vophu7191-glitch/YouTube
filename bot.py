@@ -40,6 +40,7 @@ HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0"))
 MEMBERS_INTENT = os.getenv("MEMBERS_INTENT", "") == "1"
 PORT = int(os.getenv("PORT", "0"))  # Render Web Service cần; Worker thì bỏ trống
 MESSAGE_CONTENT_INTENT = os.getenv("MESSAGE_CONTENT_INTENT", "") == "1"
+PRESENCE_INTENT = os.getenv("PRESENCE_INTENT", "") == "1"
 YT_DAILY_QUOTA_LIMIT = max(int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000")), 1)
 YT_QUOTA_RESERVE = max(int(os.getenv("YT_QUOTA_RESERVE", "2000")), 0)
 YT_QUOTA_COSTS = {"liveChat/messages": 5, "videos": 1, "channels": 1, "search": 100}
@@ -70,6 +71,7 @@ vinfo: dict[str, dict] = {}  # video_id -> thông tin live (tên, kênh...)
 home_gid: int | None = None  # server chính, xác định lúc khởi động
 message_delete_tasks: set[asyncio.Task] = set()
 ended: set[str] = set()  # video đã live xong, không kiểm tra lại
+presence_cache: dict[tuple[int, int], discord.Status] = {}  # trạng thái hiện tại, chỉ giữ trong RAM
 
 
 # ---------- YouTube ----------
@@ -949,9 +951,23 @@ class Bot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = MEMBERS_INTENT
+        intents.presences = PRESENCE_INTENT
         intents.message_content = MESSAGE_CONTENT_INTENT
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+
+    async def on_presence_update(self, before: discord.Member, after: discord.Member):
+        if not PRESENCE_INTENT or after.guild is None:
+            return
+        key = (after.guild.id, after.id)
+        opted_out = await db.presence_optouts.find_one({"_id": f"{after.guild.id}:{after.id}"}, {"_id": 1})
+        if opted_out:
+            presence_cache.pop(key, None)
+            return
+        presence_cache[key] = after.status
+
+    async def on_member_remove(self, member: discord.Member):
+        presence_cache.pop((member.guild.id, member.id), None)
 
     async def setup_hook(self):
         global session
@@ -1272,6 +1288,109 @@ async def on_message(message: discord.Message):
         )
     finally:
         link_message_pending.discard(key)
+
+
+class PresenceView(discord.ui.View):
+    def __init__(self, rows: list[tuple[str, str]], owner_id: int):
+        super().__init__(timeout=180)
+        self.rows = rows
+        self.owner_id = owner_id
+        self.page = 0
+        self.per_page = 20
+        self.pages = max(1, (len(rows) + self.per_page - 1) // self.per_page)
+
+    def embed(self) -> discord.Embed:
+        start = self.page * self.per_page
+        chunk = self.rows[start:start + self.per_page]
+        description = "\\n".join(f"{emoji} **{name}** — {status}" for name, status, emoji in chunk)
+        embed = discord.Embed(
+            title="Trạng thái thành viên",
+            description=description or "Không có thành viên để hiển thị.",
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"{len(self.rows)} thành viên • Trang {self.page + 1}/{self.pages}")
+        return embed
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.owner_id:
+            await inter.response.send_message("Bảng này thuộc về người đã mở lệnh.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, inter: discord.Interaction, button: discord.ui.Button):
+        self.page = (self.page - 1) % self.pages
+        await inter.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, inter: discord.Interaction, button: discord.ui.Button):
+        self.page = (self.page + 1) % self.pages
+        await inter.response.edit_message(embed=self.embed(), view=self)
+
+
+@bot.tree.command(name="trang-thai", description="Xem trạng thái hoạt động hiện tại của thành viên")
+@app_commands.guild_only()
+async def presence_list_cmd(inter: discord.Interaction):
+    if not PRESENCE_INTENT:
+        await inter.response.send_message(
+            "Jion chưa bật Presence Intent. Quản trị viên cần bật intent trong Developer Portal và đặt PRESENCE_INTENT=1.",
+            ephemeral=True,
+        )
+        return
+    await inter.response.defer(ephemeral=True)
+    guild = inter.guild
+    if not guild.chunked:
+        await guild.chunk()
+
+    opted_out = {
+        row["user_id"]
+        async for row in db.presence_optouts.find({"guild_id": guild.id}, {"user_id": 1})
+    }
+    labels = {
+        discord.Status.online: ("Online", "🟢"),
+        discord.Status.idle: ("Idle", "🟡"),
+        discord.Status.dnd: ("Không làm phiền", "🔴"),
+        discord.Status.offline: ("Offline / Ẩn", "⚫"),
+    }
+    rows = []
+    for member in guild.members:
+        if member.bot or member.id in opted_out:
+            continue
+        status = presence_cache.get((guild.id, member.id), member.status)
+        label, emoji = labels.get(status, ("Không rõ", "⚪"))
+        rows.append((member.display_name, label, emoji))
+    rows.sort(key=lambda row: row[0].casefold())
+    view = PresenceView(rows, inter.user.id)
+    await inter.followup.send(embed=view.embed(), view=view, ephemeral=True)
+
+
+@bot.tree.command(name="presence-opt-out", description="Từ chối hiển thị trạng thái Discord của bạn trong Jion")
+@app_commands.guild_only()
+async def presence_opt_out_cmd(inter: discord.Interaction):
+    await db.presence_optouts.update_one(
+        {"_id": f"{inter.guild_id}:{inter.user.id}"},
+        {"$set": {
+            "guild_id": inter.guild_id,
+            "user_id": inter.user.id,
+            "opted_out_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    presence_cache.pop((inter.guild_id, inter.user.id), None)
+    await inter.response.send_message(
+        "Đã ghi nhận lựa chọn từ chối. Jion sẽ không hiển thị hoặc lưu trạng thái Presence của bạn.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="presence-opt-in", description="Cho phép Jion hiển thị trạng thái Discord của bạn")
+@app_commands.guild_only()
+async def presence_opt_in_cmd(inter: discord.Interaction):
+    await db.presence_optouts.delete_one({"_id": f"{inter.guild_id}:{inter.user.id}"})
+    await inter.response.send_message(
+        "Đã bật lại việc hiển thị trạng thái. Jion sẽ cập nhật khi nhận được Presence tiếp theo.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="set-kênh-nhận-link", description="Chọn kênh duy nhất để Jion tự nhận diện link YouTube (admin)")
