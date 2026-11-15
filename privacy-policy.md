@@ -7,7 +7,7 @@ _Last updated: 16 November 2026_
 Jion is intended to connect Discord communities with public YouTube channel and livestream information. Depending on the features enabled, it may help server administrators maintain membership-related features, link a member's Discord identity with a YouTube channel, monitor public livestreams, and post livestream notifications.
 
 **Operator:** [Add the name of the individual or organization operating Jion]  
-**Privacy contact:** [Add a monitored contact email]  
+**Privacy contact:** vophu7191@gmail.com  
 **Website:** [Add the official website, if available]
 
 Do not publish this policy until the placeholders above have been completed and the descriptions have been checked against the deployed application.
@@ -54,7 +54,7 @@ Jion does not sell personal information. Information may be processed by infrast
 
 Jion keeps current Presence values in temporary bot memory and does not persist Presence status or status history in its database. A user's Presence opt-out preference is stored so the choice remains effective after a restart. Jion should retain other personal information only for as long as it is needed for the disclosed feature, security, or legal obligations. When a Discord-to-YouTube link is removed, the associated link data and OAuth credentials should be deleted or invalidated when no longer needed.
 
-Users can opt out of Presence display in each server with `/presence-opt-out` and opt back in with `/presence-opt-in`. The opt-out preference can be removed by opting back in. To request access to or deletion of other information, contact **[Add a monitored contact email]**. Users can also revoke Google authorization through their Google Account settings. Revoking authorization may stop YouTube-linked features from working.
+Users can opt out of Presence display in each server with `/presence-opt-out` and opt back in with `/presence-opt-in`. The opt-out preference can be removed by opting back in. To request access to or deletion of other information, contact **vophu7191@gmail.com**. Users can also revoke Google authorization through their Google Account settings. Revoking authorization may stop YouTube-linked features from working.
 
 ## 8. Security
 
@@ -70,7 +70,7 @@ This policy may be updated when Jion's features, data practices, or legal requir
 
 ## 11. Contact
 
-For privacy questions or data requests: **[Add a monitored contact email]**.
+For privacy questions or data requests: **vophu7191@gmail.com**.
 
 ---
 
