@@ -7,7 +7,7 @@ _Last updated: 16 November 2026_
 These Terms of Service govern use of Jion. By adding, configuring, or using Jion, you agree to these terms and to the applicable terms and policies of Discord, Google, and YouTube. If you do not agree, do not use Jion.
 
 **Operator:** [Add the name of the individual or organization operating Jion]  
-**Support contact:** [Add a monitored contact email]
+**Support contact:** vophu7191@gmail.com
 
 Do not publish these terms until the placeholders above have been completed and the terms have been checked against the deployed application.
 
@@ -70,4 +70,4 @@ Updated terms will be published at this page. Continued use after an update take
 
 ## 11. Contact
 
-Questions about these terms: **[Add a monitored contact email]**.
+Questions about these terms: **vophu7191@gmail.com**.
