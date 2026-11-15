@@ -1291,7 +1291,7 @@ async def on_message(message: discord.Message):
 
 
 class PresenceView(discord.ui.View):
-    def __init__(self, rows: list[tuple[str, str]], owner_id: int):
+    def __init__(self, rows: list[tuple[str, str, str]], owner_id: int):
         super().__init__(timeout=180)
         self.rows = rows
         self.owner_id = owner_id
@@ -1302,7 +1302,7 @@ class PresenceView(discord.ui.View):
     def embed(self) -> discord.Embed:
         start = self.page * self.per_page
         chunk = self.rows[start:start + self.per_page]
-        description = "\\n".join(f"{emoji} **{name}** — {status}" for name, status, emoji in chunk)
+        description = "\n".join(f"{emoji} **{name}** — {status}" for name, status, emoji in chunk)
         embed = discord.Embed(
             title="Trạng thái thành viên",
             description=description or "Không có thành viên để hiển thị.",
@@ -1378,7 +1378,7 @@ async def presence_opt_out_cmd(inter: discord.Interaction):
     )
     presence_cache.pop((inter.guild_id, inter.user.id), None)
     await inter.response.send_message(
-        "Đã ghi nhận lựa chọn từ chối. Jion sẽ không hiển thị hoặc lưu trạng thái Presence của bạn.",
+        "Đã ghi nhận lựa chọn từ chối. Jion sẽ không hiển thị trạng thái của bạn hoặc lưu trạng thái đó vào cơ sở dữ liệu.",
         ephemeral=True,
     )
 
