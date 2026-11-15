@@ -4,4 +4,4 @@ motor>=3.5
 dnspython>=2.6
 certifi
 yt-dlp==2026.10.26
-git+https://github.com/Indigo128/chat-downloader.git@be9ee73bbc403a13a99cc647fba851c5f56926de
+git+https://github.com/Indigo128/chat-downloader.git@master
