@@ -2567,16 +2567,23 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
     except Exception as exc:
         error_text = str(exc)
         log.warning("Không tải được Live Chat Replay %s: %s", video_id, error_text[:500])
-        if "failed to extract any player response" in error_text.lower():
+        if "http 429" in error_text.lower():
             message = (
-                "YouTube không trả dữ liệu player cho yt-dlp từ máy chủ Render, kể cả sau lần thử cấu hình dự phòng. "
-                "Điều này **không chứng minh video đã tắt Live Chat Replay**; có thể YouTube đang giới hạn request hoặc thay đổi hệ thống player. "
-                "Bot chưa ghi dữ liệu nào. Hãy thử lại sau."
+                "YouTube đang giới hạn yêu cầu từ máy chủ (HTTP 429). "
+                "Bot không gửi lặp để tránh làm giới hạn kéo dài. "
+                "Hãy chờ rồi thử lại bằng lệnh này; chưa có dữ liệu replay nào được ghi."
+            )
+        elif "http 403" in error_text.lower():
+            message = (
+                "YouTube từ chối yêu cầu đọc Live Chat Replay (HTTP 403). "
+                "Đây là giới hạn truy cập từ máy chủ, chưa chứng minh replay bị tắt. "
+                "Bot chưa ghi dữ liệu replay nào."
             )
         else:
             message = (
-                "Không đọc được Live Chat Replay bằng yt-dlp. Lỗi: "
-                f"`{error_text[:250]}`. Điều này chưa đủ để kết luận video đã tắt replay. Bot chưa ghi dữ liệu nào."
+                "Không đọc được Live Chat Replay. Lỗi: "
+                f"`{error_text[:250]}`. Điều này chưa đủ để kết luận video đã tắt replay. "
+                "Bot chưa ghi dữ liệu replay nào."
             )
         await inter.followup.send(message, ephemeral=True)
         return
@@ -3017,9 +3024,4 @@ async def streamer_autocomplete(inter: discord.Interaction, current: str):
 
 
 if __name__ == "__main__":
-    try:
-        from importlib.metadata import version
-        log.info("yt-dlp version: %s", version("yt-dlp"))
-    except Exception:
-        log.exception("Không xác định được phiên bản yt-dlp")
     bot.run(TOKEN)
