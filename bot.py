@@ -2397,8 +2397,8 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
                 category = "extractor_error"
 
             safe_message = re.sub(
-                r"(?i)(cookie|authorization|token|visitor_data)(\\s*[:=]\\s*)[^\\s,;]+",
-                r"\\1\\2[REDACTED]", message,
+                r"(?i)(cookie|authorization|token|visitor_data)(\s*[:=]\s*)[^\s,;]+",
+                r"\1\2[REDACTED]", message,
             )
             log.warning(
                 "Live Chat Replay lỗi video=%s category=%s error=%s",
