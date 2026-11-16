@@ -2643,47 +2643,6 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
     )
 
 
-def _inspect_chat_downloader_replay(video_url: str) -> dict:
-    """Đọc thử replay bằng chat-downloader; tuyệt đối không ghi MongoDB."""
-    from chat_downloader import ChatDownloader
-
-    chat = ChatDownloader().get_chat(
-        video_url,
-        message_groups=["superchat", "tickers"],
-        max_messages=3000,
-    )
-    total = 0
-    paid = 0
-    missing = {"message_id": 0, "author_id": 0, "money": 0, "timestamp": 0}
-    samples = []
-    for message in chat:
-        total += 1
-        message_type = message.get("message_type")
-        if message_type not in {
-            "paid_message", "paid_sticker",
-            "ticker_paid_message_item", "ticker_paid_sticker_item",
-        }:
-            continue
-        paid += 1
-        for key in missing:
-            if not message.get(key):
-                missing[key] += 1
-        if len(samples) < 5:
-            author_images = message.get("author_images") or []
-            samples.append({
-                "message_id": message.get("message_id"),
-                "message_type": message_type,
-                "author_id": message.get("author_id"),
-                "author_name": message.get("author_name"),
-                "money": message.get("money"),
-                "message": message.get("message"),
-                "timestamp": message.get("timestamp"),
-                "time_in_seconds": message.get("time_in_seconds"),
-                "avatar": author_images[0].get("url") if author_images else None,
-            })
-    return {"total_messages": total, "paid_messages": paid, "missing": missing, "samples": samples}
-
-
 @bot.tree.command(name="test-replay", description="Kiểm tra dữ liệu Super Chat từ replay, không ghi database")
 @app_commands.describe(video="Link hoặc ID video YouTube đã kết thúc")
 @app_commands.default_permissions(manage_guild=True)
