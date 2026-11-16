@@ -99,7 +99,14 @@ def download_replay(video_id: str, *, max_pages: int = 200) -> tuple[dict, list[
 
     initial = _extract_json_assignment(html, "ytInitialData")
     player = _extract_json_assignment(html, "ytInitialPlayerResponse")
-    config = _extract_json_assignment(html, "ytcfg")
+    config = {}
+    for match in re.finditer(r"ytcfg\\.set\\(\\s*(\\{)", html):
+        try:
+            value, _ = json.JSONDecoder().raw_decode(html[match.start(1):])
+            if isinstance(value, dict):
+                config.update(value)
+        except json.JSONDecodeError:
+            continue
     context = config.get("INNERTUBE_CONTEXT")
     api_key = config.get("INNERTUBE_API_KEY")
     if not isinstance(context, dict) or not api_key:
