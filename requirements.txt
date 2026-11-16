@@ -3,5 +3,3 @@ aiohttp>=3.9
 motor>=3.5
 dnspython>=2.6
 certifi
-yt-dlp[default]==2026.10.26
-git+https://github.com/Indigo128/chat-downloader.git@master
