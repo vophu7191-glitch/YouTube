@@ -100,7 +100,7 @@ def download_replay(video_id: str, *, max_pages: int = 200) -> tuple[dict, list[
     initial = _extract_json_assignment(html, "ytInitialData")
     player = _extract_json_assignment(html, "ytInitialPlayerResponse")
     config = {}
-    for match in re.finditer(r"ytcfg\\.set\\(\\s*(\\{)", html):
+    for match in re.finditer(r"ytcfg\.set\(\s*(\{)", html):
         try:
             value, _ = json.JSONDecoder().raw_decode(html[match.start(1):])
             if isinstance(value, dict):
