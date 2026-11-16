@@ -2338,7 +2338,7 @@ def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
     """Tải Live Chat Replay bằng yt-dlp với EJS/Deno; không spam fallback khi YouTube từ chối."""
     from yt_dlp import YoutubeDL, version
 
-    video_id_match = re.search(r"(?:v=|youtu\\.be/|live/|shorts/)([\\w-]{11})", video_url)
+    video_id_match = re.search(r"(?:v=|youtu\.be/|live/|shorts/)([\w-]{11})", video_url)
     video_id = video_id_match.group(1) if video_id_match else "unknown"
     deno_path = Path.home() / ".deno" / "bin" / "deno"
     if deno_path.is_file():
