@@ -2335,89 +2335,13 @@ async def watch_cmd(inter: discord.Interaction, video: str):
 
 
 def _download_live_chat_replay(video_url: str) -> tuple[dict, list[dict]]:
-    """Tải Live Chat Replay bằng yt-dlp với EJS/Deno; không spam fallback khi YouTube từ chối."""
-    from yt_dlp import YoutubeDL, version
+    """Đọc Live Chat Replay bằng bộ đọc Innertube riêng."""
+    from youtube_replay import download_replay
 
-    video_id_match = re.search(r"(?:v=|youtu\.be/|live/|shorts/)([\w-]{11})", video_url)
-    video_id = video_id_match.group(1) if video_id_match else "unknown"
-    deno_path = Path.home() / ".deno" / "bin" / "deno"
-    if deno_path.is_file():
-        os.environ["PATH"] = str(deno_path.parent) + os.pathsep + os.environ.get("PATH", "")
+    match = re.search(r"(?:v=|youtu\\.be/|live/|shorts/)([\\w-]{11})", video_url)
+    video_id = match.group(1) if match else video_url.strip()
+    return download_replay(video_id)
 
-    log.info(
-        "Bắt đầu tải Live Chat Replay video=%s yt-dlp=%s deno=%s",
-        video_id, version.__version__, deno_path.is_file(),
-    )
-    with tempfile.TemporaryDirectory(prefix="yt-chat-") as temp_dir:
-        opts = {
-            "skip_download": True,
-            "writesubtitles": True,
-            "subtitleslangs": ["live_chat"],
-            "subtitlesformat": "json",
-            "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": False,
-            "noplaylist": True,
-            "ignoreerrors": False,
-            "socket_timeout": 30,
-            "retries": 1,
-            "extractor_retries": 1,
-            "fragment_retries": 1,
-            "js_runtimes": {"deno": {"path": str(deno_path)}} if deno_path.is_file() else {},
-            "verbose": True,
-        }
-        try:
-            with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-
-            files = list(Path(temp_dir).glob("*.live_chat.json"))
-            if not files:
-                files = [p for p in Path(temp_dir).glob("*.json") if p.name != "info.json"]
-            if not files:
-                raise ValueError("yt-dlp không tạo tệp live_chat.json dù đã đọc được thông tin video.")
-
-            raw = json.loads(files[0].read_text(encoding="utf-8"))
-            events = raw if isinstance(raw, list) else raw.get("events", [])
-            if not isinstance(events, list):
-                raise ValueError("Dữ liệu Live Chat Replay không đúng định dạng JSON.")
-            log.info("Tải Live Chat Replay thành công video=%s events=%s", video_id, len(events))
-            return info, events
-        except Exception as exc:
-            message = str(exc)
-            lowered = message.lower()
-            if "failed to extract any player response" in lowered:
-                category = "player_response_missing"
-            elif any(term in lowered for term in ("http error 403", "http error 429", "too many requests")):
-                category = "http_restricted"
-            elif any(term in lowered for term in ("timed out", "timeout", "temporary failure", "connection")):
-                category = "network_error"
-            elif "live_chat" in lowered and any(term in lowered for term in ("not available", "no subtitles", "requested format")):
-                category = "replay_unavailable"
-            else:
-                category = "extractor_error"
-
-            safe_message = re.sub(
-                r"(?i)(cookie|authorization|token|visitor_data)(\s*[:=]\s*)[^\s,;]+",
-                r"\1\2[REDACTED]", message,
-            )
-            log.warning(
-                "Live Chat Replay lỗi video=%s category=%s error=%s",
-                video_id, category, safe_message[:700],
-            )
-            if category == "http_restricted":
-                raise RuntimeError(
-                    "YouTube đang trả HTTP 403/429 cho máy chủ Render. "
-                    "Đã dừng sau một lượt để tránh tăng giới hạn; thử lại sau. "
-                    + safe_message[:500]
-                ) from exc
-            if category == "player_response_missing" and not deno_path.is_file():
-                raise RuntimeError(
-                    "Render chưa cài Deno. Hãy đặt Build Command thành "
-                    "`bash render-build.sh` rồi deploy lại."
-                ) from exc
-            raise RuntimeError(
-                f"Không tải được Live Chat Replay [{category}]: {safe_message[:700]}"
-            ) from exc
 
 def _replay_paid_events(events: list[dict]) -> list[dict]:
     """Chuẩn hoá các Super Chat/Sticker renderer trong JSON replay."""
@@ -2766,53 +2690,47 @@ def _inspect_chat_downloader_replay(video_url: str) -> dict:
 @app_commands.guild_only()
 async def test_replay_cmd(inter: discord.Interaction, video: str):
     await inter.response.defer(ephemeral=True, thinking=True)
-    match = re.search(r"(?:v=|youtu\.be/|live/)([\w-]{11})", video)
+    match = re.search(r"(?:v=|youtu\\.be/|live/|shorts/)([\\w-]{11})", video)
     video_id = match.group(1) if match else video.strip()
-    if not re.fullmatch(r"[\w-]{11}", video_id):
+    if not re.fullmatch(r"[\\w-]{11}", video_id):
         await inter.followup.send("Link hoặc ID video YouTube không hợp lệ.", ephemeral=True)
         return
     try:
-        result = await asyncio.wait_for(
+        info, events = await asyncio.wait_for(
             asyncio.to_thread(
-                _inspect_chat_downloader_replay,
+                _download_live_chat_replay,
                 f"https://www.youtube.com/watch?v={video_id}",
             ),
-            timeout=180,
+            timeout=240,
         )
+        paid = _replay_paid_events(events)
     except asyncio.TimeoutError:
-        await inter.followup.send("Đã chờ 180 giây nhưng thư viện chưa trả kết quả. Không ghi dữ liệu nào.", ephemeral=True)
+        await inter.followup.send("Đã chờ 240 giây nhưng YouTube chưa trả replay. Không ghi dữ liệu nào.", ephemeral=True)
         return
     except Exception as exc:
-        log.warning("Chat-downloader replay test failed for %s: %s", video_id, str(exc)[:500])
+        log.warning("Replay reader failed for %s: %s", video_id, str(exc)[:500])
         await inter.followup.send(
-            f"Thư viện chưa đọc được replay: `{type(exc).__name__}: {str(exc)[:700]}`. Không ghi dữ liệu nào.",
+            f"Bộ đọc replay chưa lấy được dữ liệu: `{type(exc).__name__}: {str(exc)[:650]}`. Không ghi dữ liệu nào.",
             ephemeral=True,
         )
         return
 
     lines = [
-        f"**Kiểm tra replay `{video_id}`**",
-        f"• Tổng tin nhắn đã đọc: **{result['total_messages']}**",
-        f"• Super Chat/Sticker/ticker: **{result['paid_messages']}**",
-        f"• Thiếu ID tin nhắn: **{result['missing']['message_id']}**",
-        f"• Thiếu ID người gửi: **{result['missing']['author_id']}**",
-        f"• Thiếu số tiền: **{result['missing']['money']}**",
-        f"• Thiếu thời gian: **{result['missing']['timestamp']}**",
+        f"**Kiểm tra replay: {info.get('title') or video_id}**",
+        f"• Video ID: `{video_id}`",
+        f"• Tổng sự kiện chat đã đọc: **{len(events)}**",
+        f"• Super Chat/Sticker: **{len(paid)}**",
     ]
-    for index, item in enumerate(result["samples"], 1):
-        money = item.get("money") or {}
+    for index, item in enumerate(paid[:5], 1):
         lines.append(
-            f"\n**Mẫu {index} — {item.get('message_type')}**"
+            f"\n**Mẫu {index} — {item.get('kind')}**"
             f"\nNgười gửi: {item.get('author_name') or 'không rõ'}"
-            f"\nID: `{item.get('author_id') or 'thiếu'}`"
-            f"\nTiền: {money.get('text') or 'thiếu'}"
-            f"\nID giao dịch: `{item.get('message_id') or 'thiếu'}`"
-            f"\nThời gian: {item.get('timestamp') or item.get('time_in_seconds') or 'thiếu'}"
-            f"\nAvatar: {'có' if item.get('avatar') else 'không có'}"
+            f"\nID kênh: `{item.get('author_id') or 'thiếu'}`"
+            f"\nSố tiền: {item.get('amount_text') or 'thiếu'}"
+            f"\nID giao dịch: `{item.get('id') or 'thiếu'}`"
         )
     lines.append("\n**Chế độ kiểm tra:** chỉ đọc, không thêm hoặc sửa dữ liệu MongoDB.")
-    output = "\n".join(lines)
-    await inter.followup.send(output[:1900], ephemeral=True)
+    await inter.followup.send("\n".join(lines)[:1900], ephemeral=True)
 
 
 @bot.tree.command(name="thêm-donate", description="Thêm tay khoản donate cũ vào bảng xếp hạng (admin)")
