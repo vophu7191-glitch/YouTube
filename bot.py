@@ -437,35 +437,33 @@ async def handle_message(item: dict, video_id: str, info: dict):
         log.warning("Chưa có tỷ giá cho %s, tính 0 VND", cur)
     vnd = int(amount * RATES_VND.get(cur, 0))
 
-    # Mỗi server theo dõi live này ghi một bản riêng, nên top của từng server độc lập nhau.
-    recorded = []
-    for gid in gids:
-        # khoản cũ (trước khi tách server) đã được chuyển về server chính với _id gốc
-        if await db.donations.find_one({"_id": item["id"], "guild_id": gid}, {"_id": 1}):
-            continue
-        try:
-            await db.donations.insert_one({
-                "_id": f"{gid}:{item['id']}",  # chống trùng khi bot khởi động lại
-                "guild_id": gid,
-                "channel_id": au["channelId"],
-                "video_id": video_id,
-                "stream_channel": info.get("channel_id") or None,  # kênh YouTube đang live
-                "amount": amount,
-                "currency": cur,
-                "vnd": vnd,
-                "comment": d.get("userComment", ""),
-                "at": datetime.now(timezone.utc),
-            })
-        except DuplicateKeyError:
-            continue
-        recorded.append(gid)
-    if not recorded:
+    donation_id = f"live:{video_id}:{item['id']}"
+    await db.donations.update_one(
+        {"_id": donation_id},
+        {"$setOnInsert": {
+            "channel_id": au["channelId"], "video_id": video_id,
+            "stream_channel": info.get("channel_id") or None,
+            "amount": amount, "currency": cur, "vnd": vnd,
+            "comment": d.get("userComment", ""), "at": datetime.now(timezone.utc),
+        }, "$addToSet": {"origin_guild_ids": {"$each": gids}}},
+        upsert=True,
+    )
+    if not gids:
         return
 
     await ensure_channel(au)
-    log.info("Donate %s %s từ %s (%d server)", amount, cur, au["displayName"], len(recorded))
-    for gid in recorded:
-        await announce(gid, au, d, vnd, info)
+    log.info("Donate %s %s từ %s (%d server)", amount, cur, au["displayName"], len(gids))
+    for gid in gids:
+        saved = await db.donations.find_one(
+            {"_id": donation_id, "announced_guilds": {"$ne": gid}}, {"_id": 1}
+        )
+        if not saved:
+            continue
+        sent = await announce(gid, au, d, vnd, info, donation_id=donation_id)
+        if sent:
+            await db.donations.update_one(
+                {"_id": donation_id}, {"$addToSet": {"announced_guilds": gid}}
+            )
 
 
 async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
@@ -489,28 +487,26 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
     vnd = int(jewels * JEWEL_RATE_VND)
     name = g.get("giftName") or "quà"
     note = f"{emoji('GIFT')} {name}" + (f" x{combo}" if combo > 1 else "")
-    donation_ids = []
-    for gid in gids:
-        donation_id = f"{gid}:{item['id']}"
-        await db.donations.update_one(
-            {"_id": donation_id},
-            {
-                "$set": {"amount": jewels, "vnd": vnd, "comment": note},
-                "$setOnInsert": {
-                    "guild_id": gid, "channel_id": au["channelId"], "video_id": video_id,
-                    "stream_channel": info.get("channel_id") or None,
-                    "currency": "JEWEL", "at": datetime.now(timezone.utc),
-                },
+    donation_id = f"live:{video_id}:{item['id']}"
+    await db.donations.update_one(
+        {"_id": donation_id},
+        {
+            "$set": {"amount": jewels, "vnd": vnd, "comment": note},
+            "$setOnInsert": {
+                "channel_id": au["channelId"], "video_id": video_id,
+                "stream_channel": info.get("channel_id") or None,
+                "currency": "JEWEL", "at": datetime.now(timezone.utc),
             },
-            upsert=True,
-        )
-        donation_ids.append((gid, donation_id))
-    if not donation_ids:
+            "$addToSet": {"origin_guild_ids": {"$each": gids}},
+        },
+        upsert=True,
+    )
+    if not gids:
         return
     await ensure_channel(au)
-    log.info("Quà %s Ngọc từ %s (%d server)", jewels, au["displayName"], len(donation_ids))
+    log.info("Quà %s Ngọc từ %s (%d server)", jewels, au["displayName"], len(gids))
     d = {"amountDisplayString": f"{jewels:,} Ngọc", "userComment": note, "currency": "JEWEL"}
-    for gid, donation_id in donation_ids:
+    for gid in gids:
         await announce(gid, au, d, vnd, info, donation_id=donation_id)
 
 
@@ -543,10 +539,11 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     e.set_footer(text=footer)
     if donation_id:
         saved = await db.donations.find_one(
-            {"_id": donation_id}, {"announce_channel_id": 1, "announce_message_id": 1}
+            {"_id": donation_id}, {"announcements": 1}
         ) or {}
-        channel_id = saved.get("announce_channel_id")
-        message_id = saved.get("announce_message_id")
+        notice = (saved.get("announcements") or {}).get(str(gid), {})
+        channel_id = notice.get("channel_id")
+        message_id = notice.get("message_id")
         if channel_id and message_id:
             channel = bot.get_channel(channel_id)
             if channel is None:
@@ -558,7 +555,7 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
                 try:
                     message = await channel.fetch_message(message_id)
                     await message.edit(embed=e)
-                    return
+                    return True
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as ex:
@@ -569,16 +566,21 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
             await db.donations.update_one(
                 {"_id": donation_id},
                 {"$set": {
-                    "announce_channel_id": sent.channel.id,
-                    "announce_message_id": sent.id,
+                    f"announcements.{gid}.channel_id": sent.channel.id,
+                    f"announcements.{gid}.message_id": sent.id,
                 }},
             )
-        elif sent:
-            log.warning("Không báo được quà Ngọc (server %s): %s", gid, sent)
+            return True
+        if sent:
+            log.warning("Không báo được donate (server %s): %s", gid, sent)
+            return False
+        return True
     else:
         err = await send_notice(gid, e, purpose="donate")
         if err:
             log.warning("Không báo được donate (server %s): %s", gid, err)
+            return False
+        return True
 
 
 async def watch_chat(video_id: str, chat_id: str, info: dict):
@@ -948,6 +950,78 @@ async def migrate_legacy():
         log.info("Đã nạp cấu hình cũ cho server chính: %s", ", ".join(updates))
 
 
+async def migrate_global_donations():
+    """Gộp các bản sao donate live/replay cũ thành một bản theo kênh YouTube."""
+    merged = 0
+    query = {
+        "video_id": {"$ne": None},
+        "stream_channel": {"$nin": [None, UNASSIGNED]},
+        "manual": {"$ne": True},
+    }
+    async for doc in db.donations.find(query):
+        old_id = str(doc["_id"])
+        video_id = doc.get("video_id")
+        guild_id = doc.get("guild_id")
+        if old_id.startswith("replay:"):
+            parts = old_id.split(":", 3)
+            if len(parts) == 4 and parts[1].isdigit():
+                new_id = f"replay:{parts[2]}:{parts[3]}"
+            elif len(parts) == 3:
+                new_id = old_id
+            else:
+                continue
+        elif old_id.startswith("live:"):
+            new_id = old_id
+        else:
+            prefix = f"{guild_id}:" if guild_id is not None else None
+            event_id = old_id[len(prefix):] if prefix and old_id.startswith(prefix) else old_id
+            new_id = f"live:{video_id}:{event_id}"
+
+        if old_id == new_id:
+            continue
+
+        origin_ids = list(doc.get("origin_guild_ids") or [])
+        if guild_id is not None and guild_id not in origin_ids:
+            origin_ids.append(guild_id)
+        announcements = dict(doc.get("announcements") or {})
+        if guild_id is not None and doc.get("announce_channel_id") and doc.get("announce_message_id"):
+            announcements[str(guild_id)] = {
+                "channel_id": doc["announce_channel_id"],
+                "message_id": doc["announce_message_id"],
+            }
+
+        existing = await db.donations.find_one({"_id": new_id})
+        if existing:
+            merged_origins = set(existing.get("origin_guild_ids") or [])
+            merged_origins.update(origin_ids)
+            merged_announcements = dict(existing.get("announcements") or {})
+            merged_announcements.update(announcements)
+            updates = {
+                "origin_guild_ids": list(merged_origins),
+                "announcements": merged_announcements,
+            }
+            if doc.get("at") and (not existing.get("at") or doc["at"] > existing["at"]):
+                for key in ("amount", "vnd", "comment", "at"):
+                    if key in doc:
+                        updates[key] = doc[key]
+            await db.donations.update_one({"_id": new_id}, {"$set": updates})
+            await db.donations.delete_one({"_id": old_id})
+            merged += 1
+            continue
+
+        doc["_id"] = new_id
+        doc["origin_guild_ids"] = origin_ids
+        doc["announcements"] = announcements
+        doc.pop("announce_channel_id", None)
+        doc.pop("announce_message_id", None)
+        await db.donations.insert_one(doc)
+        await db.donations.delete_one({"_id": old_id})
+        merged += 1
+
+    if merged:
+        log.info("Đã hợp nhất %d bản ghi donate toàn cục", merged)
+
+
 async def fix_zero_donations():
     """Tính lại các khoản đang bị 0₫ vì lúc ghi chưa có tỷ giá cho loại tiền đó."""
     fixed = 0
@@ -994,7 +1068,8 @@ class Bot(discord.Client):
             await backfill_stream_channels()
         except Exception:
             log.exception("Không gán được kênh cho donate cũ (sẽ thử lại lần khởi động sau)")
-        await db.donations.create_index([("guild_id", 1), ("stream_channel", 1)])
+        await migrate_global_donations()
+        await db.donations.create_index([("stream_channel", 1)])
         await db.reviews.create_index([("guild_id", 1), ("cycle", 1), ("status", 1)])
         await self.tree.sync()
         self._boot_task = asyncio.create_task(self._after_ready())
@@ -2152,7 +2227,9 @@ RANK_PER = 10  # số người mỗi trang ở danh sách đầy đủ
 
 
 def rank_match(gid: int, sid: str) -> dict:
-    return {"guild_id": gid, "stream_channel": None if sid == UNASSIGNED else sid}
+    if sid == UNASSIGNED:
+        return {"guild_id": gid, "stream_channel": None}
+    return {"stream_channel": sid}
 
 
 def rank_pipeline(gid: int, sid: str) -> list[dict]:
@@ -2526,12 +2603,13 @@ async def auto_recover_live(video_id: str, info: dict):
                 except (TypeError, ValueError, OSError, OverflowError):
                     at = datetime.now(timezone.utc)
 
-                donation_id = f"replay:{gid}:{video_id}:{item['id']}"
+                donation_id = f"replay:{video_id}:{item['id']}"
                 result = await db.donations.update_one(
                     {"_id": donation_id},
                     {"$setOnInsert": {
-                        "guild_id": gid, "channel_id": item["author_id"],
+                        "channel_id": item["author_id"],
                         "video_id": video_id, "stream_channel": stream_id,
+                        "origin_guild_ids": [gid],
                         "amount": amount, "currency": currency,
                         "vnd": int(amount * RATES_VND[currency]),
                         "comment": item.get("comment") or item.get("kind"),
@@ -2678,12 +2756,13 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
             at = datetime.fromtimestamp(ts / 1_000_000, timezone.utc) if ts > 10**12 else datetime.now(timezone.utc)
         except (TypeError, ValueError, OSError):
             at = datetime.now(timezone.utc)
-        donation_id = f"replay:{inter.guild_id}:{video_id}:{item['id']}"
+        donation_id = f"replay:{video_id}:{item['id']}"
         result = await db.donations.update_one(
             {"_id": donation_id},
             {"$setOnInsert": {
-                "guild_id": inter.guild_id, "channel_id": item["author_id"],
+                "channel_id": item["author_id"],
                 "video_id": video_id, "stream_channel": stream_id,
+                "origin_guild_ids": [inter.guild_id],
                 "amount": amount, "currency": currency, "vnd": vnd,
                 "comment": item["comment"] or item["kind"], "at": at,
                 "recovered_from_replay": True, "replay_amount_text": item["amount_text"],
