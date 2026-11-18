@@ -1344,6 +1344,55 @@ class PresenceView(discord.ui.View):
         await inter.response.edit_message(embed=self.embed(), view=self)
 
 
+@bot.tree.command(name="bot-info", description="Xem tình trạng hoạt động của Jion")
+@app_commands.guild_only()
+async def bot_info_cmd(inter: discord.Interaction):
+    await inter.response.defer(ephemeral=True)
+
+    embed = discord.Embed(
+        title="🤖 JION • SYSTEM STATUS",
+        description="Thông tin hoạt động hiện tại của bot.",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Discord", value=f"🟢 Kết nối • {bot.latency * 1000:.0f} ms", inline=True)
+    embed.add_field(name="Server", value=f"{len(bot.guilds)} server", inline=True)
+    embed.add_field(name="Live đang theo dõi", value=f"{len(watchers)} phiên", inline=True)
+    embed.add_field(
+        name="Bộ giám sát",
+        value="🟢 Đang chạy" if monitor.is_running() else "⚠️ Chưa chạy",
+        inline=True,
+    )
+
+    try:
+        await db.command("ping")
+        embed.add_field(name="MongoDB", value="🟢 Kết nối bình thường", inline=True)
+    except Exception:
+        embed.add_field(name="MongoDB", value="🔴 Không kết nối được", inline=True)
+        log.exception("Kiểm tra MongoDB từ /bot-info thất bại")
+
+    try:
+        quota = await quota_status()
+        embed.add_field(
+            name="YouTube API quota",
+            value=f"{quota['used']:,} / {YT_DAILY_QUOTA_LIMIT:,} đơn vị đã dùng hôm nay",
+            inline=False,
+        )
+        if quota.get("blocked_until"):
+            reset = quota["blocked_until"]
+            embed.add_field(
+                name="Quota tạm khóa",
+                value=f"Đến <t:{int(reset.timestamp())}:f>",
+                inline=False,
+            )
+    except Exception:
+        embed.add_field(name="YouTube API quota", value="⚠️ Chưa lấy được dữ liệu", inline=False)
+        log.exception("Không đọc được quota trong /bot-info")
+
+    embed.set_footer(text="Jion • Trạng thái tại thời điểm kiểm tra")
+    await inter.followup.send(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="trang-thai", description="Xem trạng thái hoạt động hiện tại của thành viên")
 @app_commands.guild_only()
 async def presence_list_cmd(inter: discord.Interaction):
