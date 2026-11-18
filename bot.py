@@ -3008,6 +3008,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
     ][:25]
 
 
+@recover_live_cmd.autocomplete("kenh")
 @top_cmd.autocomplete("kenh")
 @bangxephang_cmd.autocomplete("kenh")
 @themdonate_cmd.autocomplete("kenh")
