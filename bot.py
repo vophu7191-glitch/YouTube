@@ -2373,7 +2373,7 @@ async def bangxephang_cmd(inter: discord.Interaction, kenh: str | None = None, t
     await inter.followup.send(embed=await view.embed(), view=view, ephemeral=True, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="top-donate", description="Xem bảng xếp hạng donate của một kênh YouTube trong server này")
+@bot.tree.command(name="top-donate", description="Xem bảng donate chung của một kênh YouTube trên mọi server")
 @app_commands.describe(
     kenh="Kênh cần xem (chọn từ gợi ý). Bỏ trống = tự chọn nếu server chỉ có 1 kênh",
     limit="Số người hiển thị (1-10)",
