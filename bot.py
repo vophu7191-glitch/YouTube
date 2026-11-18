@@ -45,6 +45,22 @@ YT_DAILY_QUOTA_LIMIT = max(int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000")), 1)
 YT_QUOTA_RESERVE = max(int(os.getenv("YT_QUOTA_RESERVE", "2000")), 0)
 YT_QUOTA_COSTS = {"liveChat/messages": 5, "videos": 1, "channels": 1, "search": 100}
 
+EMOJIS = {
+    "LIVE": os.getenv("EMOJI_LIVE", "🔴"),
+    "DONATE": os.getenv("EMOJI_DONATE", "💛"),
+    "JEWEL": os.getenv("EMOJI_JEWEL", "💎"),
+    "GIFT": os.getenv("EMOJI_GIFT", "🎁"),
+    "LOADING": os.getenv("EMOJI_LOADING", "🔄"),
+    "SUCCESS": os.getenv("EMOJI_SUCCESS", "✅"),
+    "ERROR": os.getenv("EMOJI_ERROR", "⚠️"),
+    "VIDEO": os.getenv("EMOJI_VIDEO", "🎬"),
+    "TROPHY": os.getenv("EMOJI_TROPHY", "🏆"),
+}
+
+
+def emoji(name: str) -> str:
+    return EMOJIS.get(name, "")
+
 # Tỷ giá ước lượng về VND để cộng tổng. Hãy chỉnh lại cho đúng ý bạn.
 RATES_VND = {
     "VND": 1, "USD": 25400, "EUR": 27500, "GBP": 32000, "JPY": 170,
@@ -275,7 +291,7 @@ async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content", 
 
 async def announce_video(gid: int, video: dict):
     embed = discord.Embed(
-        title=f"🎬 {video['title']}"[:256],
+        title=f"{emoji('VIDEO')} {video['title']}"[:256],
         url=f"https://www.youtube.com/watch?v={video['video_id']}",
         description=f"Kênh **{video['channel']}** vừa đăng video mới.",
         color=discord.Color.blurple(),
@@ -295,7 +311,7 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
     if (vid, gid) in announced and not force:
         return None
     e = discord.Embed(
-        title=f"🔴 {info['title']}"[:256],
+        title=f"{emoji('LIVE')} {info['title']}"[:256],
         url=f"https://www.youtube.com/watch?v={vid}",
         description=(
             f"Kênh [{info['channel']}](https://www.youtube.com/channel/{info['channel_id']}) đang live.\n"
@@ -472,7 +488,7 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
     jewels = jewels_each * combo
     vnd = int(jewels * JEWEL_RATE_VND)
     name = g.get("giftName") or "quà"
-    note = f"🎁 {name}" + (f" x{combo}" if combo > 1 else "")
+    note = f"{emoji('GIFT')} {name}" + (f" x{combo}" if combo > 1 else "")
     donation_ids = []
     for gid in gids:
         donation_id = f"{gid}:{item['id']}"
@@ -505,14 +521,14 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     is_jewel = d.get("currency") == "JEWEL"
     amount = d.get("amountDisplayString") or "Ủng hộ"
     e = discord.Embed(
-        title="💎 QUÀ NGỌC MỚI" if is_jewel else "💛 DONATE MỚI",
+        title=f"{emoji('JEWEL')} QUÀ NGỌC MỚI" if is_jewel else f"{emoji('DONATE')} DONATE MỚI",
         url=f"https://www.youtube.com/channel/{au['channelId']}",
         description=f"**{who}** vừa gửi quà ủng hộ!",
         color=discord.Color.purple() if is_jewel else discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
     e.set_author(name=info.get("handle") or au["displayName"], icon_url=au.get("profileImageUrl"))
-    e.add_field(name="🎁 Số Ngọc" if is_jewel else "💰 Số tiền ủng hộ",
+    e.add_field(name=f"{emoji('GIFT')} Số Ngọc" if is_jewel else "💰 Số tiền ủng hộ",
                 value=f"**{amount}**", inline=True)
     e.add_field(name="💵 Giá trị quy đổi ước tính",
                 value=f"**{vnd:,}₫**", inline=True)
@@ -1326,6 +1342,55 @@ class PresenceView(discord.ui.View):
     async def next(self, inter: discord.Interaction, button: discord.ui.Button):
         self.page = (self.page + 1) % self.pages
         await inter.response.edit_message(embed=self.embed(), view=self)
+
+
+@bot.tree.command(name="bot-info", description="Xem tình trạng hoạt động của Jion")
+@app_commands.guild_only()
+async def bot_info_cmd(inter: discord.Interaction):
+    await inter.response.defer(ephemeral=True)
+
+    embed = discord.Embed(
+        title="🤖 JION • SYSTEM STATUS",
+        description="Thông tin hoạt động hiện tại của bot.",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Discord", value=f"🟢 Kết nối • {bot.latency * 1000:.0f} ms", inline=True)
+    embed.add_field(name="Server", value=f"{len(bot.guilds)} server", inline=True)
+    embed.add_field(name="Live đang theo dõi", value=f"{len(watchers)} phiên", inline=True)
+    embed.add_field(
+        name="Bộ giám sát",
+        value="🟢 Đang chạy" if monitor.is_running() else "⚠️ Chưa chạy",
+        inline=True,
+    )
+
+    try:
+        await db.command("ping")
+        embed.add_field(name="MongoDB", value="🟢 Kết nối bình thường", inline=True)
+    except Exception:
+        embed.add_field(name="MongoDB", value="🔴 Không kết nối được", inline=True)
+        log.exception("Kiểm tra MongoDB từ /bot-info thất bại")
+
+    try:
+        quota = await quota_status()
+        embed.add_field(
+            name="YouTube API quota",
+            value=f"{quota['used']:,} / {YT_DAILY_QUOTA_LIMIT:,} đơn vị đã dùng hôm nay",
+            inline=False,
+        )
+        if quota.get("blocked_until"):
+            reset = quota["blocked_until"]
+            embed.add_field(
+                name="Quota tạm khóa",
+                value=f"Đến <t:{int(reset.timestamp())}:f>",
+                inline=False,
+            )
+    except Exception:
+        embed.add_field(name="YouTube API quota", value="⚠️ Chưa lấy được dữ liệu", inline=False)
+        log.exception("Không đọc được quota trong /bot-info")
+
+    embed.set_footer(text="Jion • Trạng thái tại thời điểm kiểm tra")
+    await inter.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="trang-thai", description="Xem trạng thái hoạt động hiện tại của thành viên")
@@ -2160,7 +2225,7 @@ class RankingView(discord.ui.View):
         rows = await rank_page(self.gid, self.sid, self.page * RANK_PER, RANK_PER)
         lines = await rank_lines(rows, self.page * RANK_PER + 1)
         e = discord.Embed(
-            title=f"🏆 Bảng xếp hạng donate • {self.sname}"[:256],
+            title=f"{emoji('TROPHY')} BẢNG XẾP HẠNG DONATE • {self.sname}"[:256],
             description="\n".join(lines) or "Chưa có ai.",
             color=discord.Color.blurple(),
         )
@@ -2276,7 +2341,7 @@ async def top_cmd(
             f"Chủ kênh ước tính: **{total:,}₫**",
         ]
         embed = discord.Embed(
-            title="🏆 TOP DONATE" if index == 0 else None,
+            title=f"{emoji('TROPHY')} TOP DONATE" if index == 0 else None,
             description=f"Kênh **{sname}**\n" + "\n".join(lines),
             color=discord.Color.gold(),
         )
