@@ -45,6 +45,20 @@ YT_DAILY_QUOTA_LIMIT = max(int(os.getenv("YT_DAILY_QUOTA_LIMIT", "10000")), 1)
 YT_QUOTA_RESERVE = max(int(os.getenv("YT_QUOTA_RESERVE", "2000")), 0)
 YT_QUOTA_COSTS = {"liveChat/messages": 5, "videos": 1, "channels": 1, "search": 100}
 
+EMOJIS = {
+    "LIVE": os.getenv("EMOJI_LIVE", "🔴"),
+    "DONATE": os.getenv("EMOJI_DONATE", "💛"),
+    "JEWEL": os.getenv("EMOJI_JEWEL", "💎"),
+    "GIFT": os.getenv("EMOJI_GIFT", "🎁"),
+    "LOADING": os.getenv("EMOJI_LOADING", "🔄"),
+    "SUCCESS": os.getenv("EMOJI_SUCCESS", "✅"),
+    "ERROR": os.getenv("EMOJI_ERROR", "⚠️"),
+}
+
+
+def emoji(name: str) -> str:
+    return EMOJIS.get(name, "")
+
 # Tỷ giá ước lượng về VND để cộng tổng. Hãy chỉnh lại cho đúng ý bạn.
 RATES_VND = {
     "VND": 1, "USD": 25400, "EUR": 27500, "GBP": 32000, "JPY": 170,
@@ -295,7 +309,7 @@ async def announce_live(vid: str, info: dict, source: str, gid: int, force: bool
     if (vid, gid) in announced and not force:
         return None
     e = discord.Embed(
-        title=f"🔴 {info['title']}"[:256],
+        title=f"{emoji('LIVE')} {info['title']}"[:256],
         url=f"https://www.youtube.com/watch?v={vid}",
         description=(
             f"Kênh [{info['channel']}](https://www.youtube.com/channel/{info['channel_id']}) đang live.\n"
@@ -472,7 +486,7 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
     jewels = jewels_each * combo
     vnd = int(jewels * JEWEL_RATE_VND)
     name = g.get("giftName") or "quà"
-    note = f"🎁 {name}" + (f" x{combo}" if combo > 1 else "")
+    note = f"{emoji('GIFT')} {name}" + (f" x{combo}" if combo > 1 else "")
     donation_ids = []
     for gid in gids:
         donation_id = f"{gid}:{item['id']}"
@@ -505,14 +519,14 @@ async def announce(gid: int, au: dict, d: dict, vnd: int, stream: dict | None = 
     is_jewel = d.get("currency") == "JEWEL"
     amount = d.get("amountDisplayString") or "Ủng hộ"
     e = discord.Embed(
-        title="💎 QUÀ NGỌC MỚI" if is_jewel else "💛 DONATE MỚI",
+        title=f"{emoji('JEWEL')} QUÀ NGỌC MỚI" if is_jewel else f"{emoji('DONATE')} DONATE MỚI",
         url=f"https://www.youtube.com/channel/{au['channelId']}",
         description=f"**{who}** vừa gửi quà ủng hộ!",
         color=discord.Color.purple() if is_jewel else discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
     e.set_author(name=info.get("handle") or au["displayName"], icon_url=au.get("profileImageUrl"))
-    e.add_field(name="🎁 Số Ngọc" if is_jewel else "💰 Số tiền ủng hộ",
+    e.add_field(name=f"{emoji('GIFT')} Số Ngọc" if is_jewel else "💰 Số tiền ủng hộ",
                 value=f"**{amount}**", inline=True)
     e.add_field(name="💵 Giá trị quy đổi ước tính",
                 value=f"**{vnd:,}₫**", inline=True)
