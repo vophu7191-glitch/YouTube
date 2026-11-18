@@ -998,9 +998,12 @@ async def migrate_global_donations():
             merged_origins.update(origin_ids)
             merged_announcements = dict(existing.get("announcements") or {})
             merged_announcements.update(announcements)
+            merged_announced = set(existing.get("announced_guilds") or [])
+            merged_announced.update(origin_ids)
             updates = {
                 "origin_guild_ids": list(merged_origins),
                 "announcements": merged_announcements,
+                "announced_guilds": list(merged_announced),
             }
             if doc.get("at") and (not existing.get("at") or doc["at"] > existing["at"]):
                 for key in ("amount", "vnd", "comment", "at"):
@@ -1014,6 +1017,7 @@ async def migrate_global_donations():
         doc["_id"] = new_id
         doc["origin_guild_ids"] = origin_ids
         doc["announcements"] = announcements
+        doc["announced_guilds"] = origin_ids
         doc.pop("announce_channel_id", None)
         doc.pop("announce_message_id", None)
         await db.donations.insert_one(doc)
