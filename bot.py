@@ -53,6 +53,8 @@ EMOJIS = {
     "LOADING": os.getenv("EMOJI_LOADING", "🔄"),
     "SUCCESS": os.getenv("EMOJI_SUCCESS", "✅"),
     "ERROR": os.getenv("EMOJI_ERROR", "⚠️"),
+    "VIDEO": os.getenv("EMOJI_VIDEO", "🎬"),
+    "TROPHY": os.getenv("EMOJI_TROPHY", "🏆"),
 }
 
 
@@ -289,7 +291,7 @@ async def send_notice(gid: int, embed: discord.Embed, purpose: str = "content", 
 
 async def announce_video(gid: int, video: dict):
     embed = discord.Embed(
-        title=f"🎬 {video['title']}"[:256],
+        title=f"{emoji('VIDEO')} {video['title']}"[:256],
         url=f"https://www.youtube.com/watch?v={video['video_id']}",
         description=f"Kênh **{video['channel']}** vừa đăng video mới.",
         color=discord.Color.blurple(),
@@ -2174,7 +2176,7 @@ class RankingView(discord.ui.View):
         rows = await rank_page(self.gid, self.sid, self.page * RANK_PER, RANK_PER)
         lines = await rank_lines(rows, self.page * RANK_PER + 1)
         e = discord.Embed(
-            title=f"🏆 Bảng xếp hạng donate • {self.sname}"[:256],
+            title=f"{emoji('TROPHY')} BẢNG XẾP HẠNG DONATE • {self.sname}"[:256],
             description="\n".join(lines) or "Chưa có ai.",
             color=discord.Color.blurple(),
         )
@@ -2290,7 +2292,7 @@ async def top_cmd(
             f"Chủ kênh ước tính: **{total:,}₫**",
         ]
         embed = discord.Embed(
-            title="🏆 TOP DONATE" if index == 0 else None,
+            title=f"{emoji('TROPHY')} TOP DONATE" if index == 0 else None,
             description=f"Kênh **{sname}**\n" + "\n".join(lines),
             color=discord.Color.gold(),
         )
