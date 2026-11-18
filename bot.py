@@ -441,6 +441,7 @@ async def handle_message(item: dict, video_id: str, info: dict):
     await db.donations.update_one(
         {"_id": donation_id},
         {"$setOnInsert": {
+            "guild_id": gids[0] if gids else None,
             "channel_id": au["channelId"], "video_id": video_id,
             "stream_channel": info.get("channel_id") or None,
             "amount": amount, "currency": cur, "vnd": vnd,
@@ -493,6 +494,7 @@ async def handle_gift(item: dict, video_id: str, info: dict, gids: list[int]):
         {
             "$set": {"amount": jewels, "vnd": vnd, "comment": note},
             "$setOnInsert": {
+                "guild_id": gids[0] if gids else None,
                 "channel_id": au["channelId"], "video_id": video_id,
                 "stream_channel": info.get("channel_id") or None,
                 "currency": "JEWEL", "at": datetime.now(timezone.utc),
@@ -955,7 +957,7 @@ async def migrate_global_donations():
     merged = 0
     query = {
         "video_id": {"$ne": None},
-        "stream_channel": {"$nin": [None, UNASSIGNED]},
+        "stream_channel": {"$exists": True, "$nin": [None, UNASSIGNED]},
         "manual": {"$ne": True},
     }
     async for doc in db.donations.find(query):
@@ -2607,15 +2609,15 @@ async def auto_recover_live(video_id: str, info: dict):
                 result = await db.donations.update_one(
                     {"_id": donation_id},
                     {"$setOnInsert": {
-                        "channel_id": item["author_id"],
+                        "guild_id": gid, "channel_id": item["author_id"],
                         "video_id": video_id, "stream_channel": stream_id,
-                        "origin_guild_ids": [gid],
                         "amount": amount, "currency": currency,
                         "vnd": int(amount * RATES_VND[currency]),
                         "comment": item.get("comment") or item.get("kind"),
                         "at": at, "recovered_from_replay": True,
                         "replay_amount_text": item.get("amount_text", ""),
                     }},
+                    "$addToSet": {"origin_guild_ids": gid},
                     upsert=True,
                 )
                 if result.upserted_id:
@@ -2760,13 +2762,13 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
         result = await db.donations.update_one(
             {"_id": donation_id},
             {"$setOnInsert": {
-                "channel_id": item["author_id"],
+                "guild_id": inter.guild_id, "channel_id": item["author_id"],
                 "video_id": video_id, "stream_channel": stream_id,
-                "origin_guild_ids": [inter.guild_id],
                 "amount": amount, "currency": currency, "vnd": vnd,
                 "comment": item["comment"] or item["kind"], "at": at,
                 "recovered_from_replay": True, "replay_amount_text": item["amount_text"],
             }},
+            "$addToSet": {"origin_guild_ids": inter.guild_id},
             upsert=True,
         )
         if result.upserted_id:
@@ -2921,11 +2923,12 @@ async def themdonate_cmd(
 async def xoadonate_cmd(inter: discord.Interaction, ma: str):
     ma = ma.strip()
     gid = inter.guild_id  # chỉ xoá được donate của chính server này
-    if ma.startswith("h:"):  # ID dài từ YouTube được rút gọn thành mã băm
-        rows = await db.donations.find({"guild_id": gid}, {"_id": 1}).sort("at", -1).limit(500).to_list(500)
-        flt = {"guild_id": gid, "_id": {"$in": [r["_id"] for r in rows if donation_key(r["_id"]) == ma]}}
+    owner_filter = {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]}
+    if ma.startswith("h:"):  # ID dài từ YouTube được rút gọn bằng mã băm
+        rows = await db.donations.find(owner_filter, {"_id": 1}).sort("at", -1).limit(500).to_list(500)
+        flt = {"$and": [owner_filter, {"_id": {"$in": [r["_id"] for r in rows if donation_key(r["_id"]) == ma]}}]}
     else:
-        flt = {"guild_id": gid, "$or": [{"_id": ma}, {"batch": ma}]}
+        flt = {"$and": [owner_filter, {"$or": [{"_id": ma}, {"batch": ma}]}]}
     r = await db.donations.delete_many(flt)
     msg = f"Đã xoá {r.deleted_count} khoản." if r.deleted_count else "Không tìm thấy khoản donate với mã này."
     await inter.response.send_message(msg, ephemeral=True)
@@ -2938,7 +2941,9 @@ def donation_key(did: str) -> str:
 
 @xoadonate_cmd.autocomplete("ma")
 async def xoadonate_autocomplete(inter: discord.Interaction, current: str):
-    rows = await db.donations.find({"guild_id": inter.guild_id}).sort("at", -1).limit(25).to_list(25)
+    rows = await db.donations.find(
+        {"$or": [{"guild_id": inter.guild_id}, {"origin_guild_ids": inter.guild_id}]}
+    ).sort("at", -1).limit(25).to_list(25)
     vn = timezone(timedelta(hours=7))
     out = []
     for r in rows:
