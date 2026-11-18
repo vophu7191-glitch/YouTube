@@ -2616,8 +2616,7 @@ async def auto_recover_live(video_id: str, info: dict):
                         "comment": item.get("comment") or item.get("kind"),
                         "at": at, "recovered_from_replay": True,
                         "replay_amount_text": item.get("amount_text", ""),
-                    }},
-                    "$addToSet": {"origin_guild_ids": gid},
+                    }, "$addToSet": {"origin_guild_ids": gid}},
                     upsert=True,
                 )
                 if result.upserted_id:
@@ -2767,8 +2766,7 @@ async def recover_live_cmd(inter: discord.Interaction, video: str, kenh: str | N
                 "amount": amount, "currency": currency, "vnd": vnd,
                 "comment": item["comment"] or item["kind"], "at": at,
                 "recovered_from_replay": True, "replay_amount_text": item["amount_text"],
-            }},
-            "$addToSet": {"origin_guild_ids": inter.guild_id},
+            }, "$addToSet": {"origin_guild_ids": inter.guild_id}},
             upsert=True,
         )
         if result.upserted_id:
