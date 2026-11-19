@@ -831,13 +831,13 @@ def parse_amount(text: str) -> float:
 
 
 async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=None, cache=None,
-                     stream_channel=None, guild_id=None, source_id=None, original_at=None, original_vnd=None, video_id=None):
+                     stream_channel=None, guild_id=None, source_id=None, original_at=None, original_vnd=None, video_id=None, original_manual=None, recovered_from_replay=False):
     """Thêm một khoản donate cũ. Ném ValueError (kèm lý do) nếu dòng không hợp lệ."""
     if amount <= 0 or cur not in RATES_VND:
         raise ValueError("số tiền hoặc loại tiền không hợp lệ")
     if not youtube and not discord_id:
         raise ValueError("thiếu cả youtube lẫn discord_id")
-    did = ("csv-" + hashlib.sha256(str(source_id).encode("utf-8")).hexdigest()[:32]) if source_id else f"manual-{uuid.uuid4().hex[:8]}"
+    did = str(source_id) if source_id else f"manual-{uuid.uuid4().hex[:8]}"
     if source_id and await db.donations.find_one({"_id": did}, {"_id": 1}):
         return None
 
@@ -866,7 +866,8 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
             "currency": cur,
             "vnd": int(original_vnd) if original_vnd is not None else int(amount * RATES_VND[cur]),
             "comment": note, "at": original_at or datetime.now(timezone.utc),
-            "manual": True, "added_by": added_by, "batch": batch,
+            "manual": bool(original_manual) if original_manual is not None else True, "added_by": added_by, "batch": batch,
+            "recovered_from_replay": bool(recovered_from_replay),
             "stream_channel": stream_channel, "guild_id": guild_id,
             "import_source_id": str(source_id)[:200] if source_id else None,
         })
@@ -3215,6 +3216,10 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
                 raise ValueError("thiếu cả youtube/youtube_channel_id lẫn discord_id")
             note = data.get("ghi_chu") or data.get("comment") or ""
             source_id = data.get("donation_id") or data.get("id") or ""
+            if len(source_id) > 200:
+                raise ValueError("donation_id vượt quá 200 ký tự")
+            original_manual = data.get("manual", "").strip().lower() in {"1", "true", "yes"} if "manual" in data else None
+            recovered = data.get("recovered_from_replay", "").strip().lower() in {"1", "true", "yes"}
             stream_text = data.get("kenh") or data.get("stream_channel_id") or kenh
             sid = await resolve_sc(stream_text)
             original_at = None
@@ -3248,7 +3253,8 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
                 "amount": amount, "currency": currency, "discord_id": discord_id,
                 "youtube": youtube, "note": note, "source_id": source_id,
                 "stream_channel": sid, "original_at": original_at, "original_vnd": original_vnd,
-                "video_id": data.get("video_id") or None,
+                "video_id": data.get("video_id") or None, "original_manual": original_manual,
+                "recovered_from_replay": recovered,
             })
         except (ValueError, TypeError) as exc:
             errors.append(f"Dòng {n}: {exc}")
@@ -3268,7 +3274,8 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
             row["youtube"], row["discord_id"], row["amount"], row["currency"],
             row["note"], inter.user.id, batch, cache, row["stream_channel"],
             inter.guild_id, row["source_id"] or None, row["original_at"],
-            row["original_vnd"], row["video_id"],
+            row["original_vnd"], row["video_id"], row["original_manual"],
+            row["recovered_from_replay"],
         )
         if did is None:
             duplicates += 1
