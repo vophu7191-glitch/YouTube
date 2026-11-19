@@ -2347,9 +2347,13 @@ async def donation_trend(gid: int, sid: str, days: int) -> tuple[list[tuple[str,
         {"$match": previous_match},
         {"$group": {"_id": None, "total": {"$sum": "$vnd"}}},
     ]).to_list(1)
-    return [(str(row["_id"]), int(row.get("total", 0))) for row in rows], (
-        sum(int(row.get("total", 0)) for row in rows)
-    ), (int(previous[0].get("total", 0)) if previous else 0)
+    by_day = {str(row["_id"]): int(row.get("total", 0)) for row in rows}
+    daily = [
+        ((start.date() + timedelta(days=offset)).isoformat(),
+         by_day.get((start.date() + timedelta(days=offset)).isoformat(), 0))
+        for offset in range(days + 1)
+    ]
+    return daily, sum(by_day.values()), (int(previous[0].get("total", 0)) if previous else 0)
 
 
 def trend_sparkline(values: list[int]) -> str:
