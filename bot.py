@@ -3118,6 +3118,25 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
 
 
 
+@bot.tree.command(name="nhat-ky-quan-tri", description="Xem các thao tác quản trị gần đây của server")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def audit_log_cmd(inter: discord.Interaction):
+    await inter.response.defer(ephemeral=True, thinking=True)
+    rows = await db.admin_audit.find({"guild_id": inter.guild_id}).sort("at", -1).limit(20).to_list(20)
+    if not rows:
+        await inter.followup.send("Server chưa có nhật ký quản trị.", ephemeral=True)
+        return
+    lines = ["**20 thao tác quản trị gần đây nhất**"]
+    for row in rows:
+        at = row.get("at")
+        stamp = at.astimezone(timezone(timedelta(hours=7))).strftime("%d/%m %H:%M") if isinstance(at, datetime) else "không rõ thời gian"
+        actor = str(row.get("actor_id", "không rõ"))
+        action = str(row.get("action", "unknown"))[:80]
+        target = str(row.get("target") or "")[:80]
+        lines.append(f"• `{stamp}` <@{actor}> — **{action}** {target}")
+    await inter.followup.send("\n".join(lines)[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
 @bot.tree.command(name="xuat-donate", description="Xuất dữ liệu donate của server thành CSV (admin)")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
