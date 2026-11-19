@@ -831,7 +831,7 @@ def parse_amount(text: str) -> float:
 
 
 async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=None, cache=None,
-                     stream_channel=None, guild_id=None):
+                     stream_channel=None, guild_id=None, source_id=None):
     """Thêm một khoản donate cũ. Ném ValueError (kèm lý do) nếu dòng không hợp lệ."""
     if amount <= 0 or cur not in RATES_VND:
         raise ValueError("số tiền hoặc loại tiền không hợp lệ")
@@ -857,13 +857,21 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
     else:
         cid = f"dc:{discord_id}"
 
-    did = f"manual-{uuid.uuid4().hex[:8]}"
-    await db.donations.insert_one({
+    did = ("csv-" + hashlib.sha256(str(source_id).encode("utf-8")).hexdigest()[:32]) if source_id else f"manual-{uuid.uuid4().hex[:8]}"
+    if source_id and await db.donations.find_one({"_id": did}, {"_id": 1}):
+        return None
+    try:
+        await db.donations.insert_one({
         "_id": did, "channel_id": cid, "video_id": None, "amount": amount,
         "currency": cur, "vnd": int(amount * RATES_VND[cur]), "comment": note,
         "at": datetime.now(timezone.utc), "manual": True, "added_by": added_by, "batch": batch,
         "stream_channel": stream_channel, "guild_id": guild_id,
+        "import_source_id": str(source_id)[:200] if source_id else None,
     })
+    except DuplicateKeyError:
+        if source_id:
+            return None
+        raise
     return did
 
 
@@ -3142,57 +3150,115 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
         await inter.response.send_message("Cần file .csv dưới 1MB.", ephemeral=True)
         return
     await inter.response.defer(ephemeral=True)
-    raw = (await file.read()).decode("utf-8-sig", errors="replace")
-    rows = list(csv.DictReader(io.StringIO(raw)))
+    try:
+        raw = (await file.read()).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        await inter.followup.send("CSV phải được mã hóa UTF-8. Hãy xuất lại file rồi thử lần nữa.", ephemeral=True)
+        return
+    try:
+        reader = csv.DictReader(io.StringIO(raw))
+        if not reader.fieldnames:
+            raise ValueError("File thiếu dòng tiêu đề.")
+        rows = list(reader)
+    except csv.Error:
+        await inter.followup.send("Không đọc được cấu trúc CSV.", ephemeral=True)
+        return
     if not rows:
-        await inter.followup.send("File trống hoặc thiếu dòng tiêu đề.")
+        await inter.followup.send("File trống hoặc thiếu dữ liệu.")
         return
     if len(rows) > 500:
         await inter.followup.send("Tối đa 500 dòng mỗi lần, hãy chia nhỏ file.")
         return
 
-    batch = f"batch-{uuid.uuid4().hex[:6]}"
     cache: dict = {}
     sc_cache: dict = {}
+    prepared = []
+    errors = []
 
-    async def sc_for(text):
-        """Kênh của một dòng CSV (nhớ kết quả để không tra lại cho từng dòng)."""
+    async def resolve_sc(text):
         key = (text or "").strip().lower()
         if key not in sc_cache:
-            sc_cache[key] = await pick_streamer(inter.guild_id, text, create=True)
+            sc_cache[key] = await pick_streamer(inter.guild_id, text or kenh, create=True)
         sc, err = sc_cache[key]
         if err:
             raise ValueError(err)
         return sc[0]
 
-    ok, errors = 0, []
-    for n, row in enumerate(rows, start=2):  # dòng 1 là tiêu đề
-        r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k and isinstance(v, (str, type(None)))}
+    for n, row in enumerate(rows, start=2):
+        if None in row:
+            errors.append(f"Dòng {n}: thừa cột so với tiêu đề.")
+            continue
+        data = {
+            str(k or "").strip().lower(): (v or "").strip()
+            for k, v in row.items() if k and isinstance(v, (str, type(None)))
+        }
         try:
-            amount = parse_amount(r.get("so_tien", ""))
-            raw_id = r.get("discord_id", "")
+            amount = parse_amount(data.get("so_tien") or data.get("amount") or "")
+            currency = (data.get("tien_te") or data.get("currency") or "VND").upper()
+            if amount <= 0 or currency not in RATES_VND:
+                raise ValueError("số tiền phải lớn hơn 0 và loại tiền phải hợp lệ")
+            raw_id = data.get("discord_id", "")
             try:
                 discord_id = int(raw_id) if raw_id else None
             except ValueError:
                 raise ValueError("discord_id không hợp lệ")
-            sid = await sc_for(r.get("kenh") or kenh)
-            await add_manual(
-                r.get("youtube") or None, discord_id, amount,
-                (r.get("tien_te") or "VND").upper(), r.get("ghi_chu", ""),
-                inter.user.id, batch, cache, sid, inter.guild_id,
-            )
-            ok += 1
-        except ValueError as e:
-            errors.append(f"Dòng {n}: {e}")
+            youtube = data.get("youtube") or data.get("youtube_channel_id") or None
+            if not youtube and not discord_id:
+                raise ValueError("thiếu cả youtube/youtube_channel_id lẫn discord_id")
+            note = data.get("ghi_chu") or data.get("comment") or ""
+            source_id = data.get("donation_id") or data.get("id") or ""
+            stream_text = data.get("kenh") or data.get("stream_channel_id") or kenh
+            sid = await resolve_sc(stream_text)
+            if youtube:
+                au = cache.get(youtube)
+                if au is None:
+                    try:
+                        au = await resolve_youtube(youtube)
+                    except YTError as exc:
+                        raise ValueError(f"lỗi YouTube: {exc}")
+                    if not au:
+                        raise ValueError("không tìm thấy kênh YouTube")
+                    await ensure_channel(au)
+                    cache[youtube] = au
+            prepared.append({
+                "amount": amount, "currency": currency, "discord_id": discord_id,
+                "youtube": youtube, "note": note, "source_id": source_id,
+                "stream_channel": sid,
+            })
+        except (ValueError, TypeError) as exc:
+            errors.append(f"Dòng {n}: {exc}")
 
-    msg = f"Đã nhập **{ok}/{len(rows)}** dòng. Mã lô: `{batch}` (dùng `/xóa-donate` với mã này để huỷ cả lô)."
     if errors:
-        msg += "\nLỗi:\n" + "\n".join(errors[:10])
-        if len(errors) > 10:
-            msg += f"\n... và {len(errors) - 10} lỗi khác."
+        msg = f"Chưa nhập dữ liệu: phát hiện {len(errors)} dòng lỗi. Không ghi khoản donate nào.\n"
+        msg += "\n".join(errors[:12])
+        if len(errors) > 12:
+            msg += f"\n... và {len(errors) - 12} lỗi khác."
+        await inter.followup.send(msg[:1990], ephemeral=True)
+        return
+
+    batch = f"batch-{uuid.uuid4().hex[:6]}"
+    ok = duplicates = 0
+    for row in prepared:
+        did = await add_manual(
+            row["youtube"], row["discord_id"], row["amount"], row["currency"],
+            row["note"], inter.user.id, batch, cache, row["stream_channel"],
+            inter.guild_id, row["source_id"] or None,
+        )
+        if did is None:
+            duplicates += 1
+        else:
+            ok += 1
+
     if ok:
-        await log_admin_action(inter, "import_donations_csv", batch, {"imported": ok, "rows": len(rows), "errors": len(errors)})
-    await inter.followup.send(msg[:1990])
+        await log_admin_action(
+            inter, "import_donations_csv", batch,
+            {"imported": ok, "rows": len(rows), "duplicates": duplicates},
+        )
+    msg = (
+        f"Đã nhập **{ok}/{len(rows)}** dòng. Bỏ qua **{duplicates}** dòng trùng "
+        f"(nếu CSV có donation_id). Mã lô: `{batch}`."
+    )
+    await inter.followup.send(msg[:1990], ephemeral=True)
 
 
 
