@@ -2462,7 +2462,7 @@ class TopMoreView(discord.ui.View):
 async def thongke_cmd(
     inter: discord.Interaction,
     kenh: str | None = None,
-    khoang: app_commands.Choice[str] = app_commands.Choice(name="7 ngày", value="7"),
+    khoang: str = "7",
 ):
     await inter.response.defer(ephemeral=True)
     sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
@@ -2476,7 +2476,7 @@ async def thongke_cmd(
         await inter.followup.send(f"Chưa có dữ liệu donate cho kênh **{sname}**.", ephemeral=True)
         return
 
-    days = int(khoang.value)
+    days = int(khoang)
     trend, current_total, previous_total = await donation_trend(inter.guild_id, sid, days)
     values = [amount for _, amount in trend]
     spark = trend_sparkline(values)
