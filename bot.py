@@ -55,6 +55,16 @@ EMOJIS = {
     "ERROR": os.getenv("EMOJI_ERROR", "⚠️"),
     "VIDEO": os.getenv("EMOJI_VIDEO", "🎬"),
     "TROPHY": os.getenv("EMOJI_TROPHY", "🏆"),
+    "OFFLINE": os.getenv("EMOJI_OFFLINE", "⚫"),
+    "WARNING": os.getenv("EMOJI_WARNING", "⚠️"),
+    "MONEY": os.getenv("EMOJI_MONEY", "💰"),
+    "RUBY": os.getenv("EMOJI_RUBY", "🔴"),
+    "CHART": os.getenv("EMOJI_CHART", "📈"),
+    "CALENDAR": os.getenv("EMOJI_CALENDAR", "🗓️"),
+    "BACKUP": os.getenv("EMOJI_BACKUP", "💾"),
+    "SETTINGS": os.getenv("EMOJI_SETTINGS", "⚙️"),
+    "LOG": os.getenv("EMOJI_LOG", "📋"),
+    "UPLOAD": os.getenv("EMOJI_UPLOAD", "📤"),
 }
 
 
@@ -2315,6 +2325,41 @@ async def donation_stats(gid: int, sid: str) -> dict | None:
     return rows[0] if rows else None
 
 
+
+async def donation_trend(gid: int, sid: str, days: int) -> tuple[list[tuple[str, int]], int, int]:
+    """Daily totals for the selected period and the immediately preceding period."""
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days)
+    previous_start = start - timedelta(days=days)
+    match = rank_match(gid, sid)
+    current_match = {"$and": [match, {"at": {"$gte": start, "$lt": now}}]}
+    previous_match = {"$and": [match, {"at": {"$gte": previous_start, "$lt": start}}]}
+    pipeline = [
+        {"$match": current_match},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$at", "timezone": "UTC"}},
+            "total": {"$sum": "$vnd"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    rows = await db.donations.aggregate(pipeline).to_list(days)
+    previous = await db.donations.aggregate([
+        {"$match": previous_match},
+        {"$group": {"_id": None, "total": {"$sum": "$vnd"}}},
+    ]).to_list(1)
+    return [(str(row["_id"]), int(row.get("total", 0))) for row in rows], (
+        sum(int(row.get("total", 0)) for row in rows)
+    ), (int(previous[0].get("total", 0)) if previous else 0)
+
+
+def trend_sparkline(values: list[int]) -> str:
+    bars = "▁▂▃▄▅▆▇█"
+    if not values or max(values) <= 0:
+        return "Chưa có dữ liệu trong kỳ."
+    peak = max(values)
+    return "".join(bars[min(7, int(value * 7 / peak))] for value in values)
+
+
 async def rank_page(gid: int, sid: str, skip: int, limit: int) -> list[dict]:
     return await db.donations.aggregate(
         rank_pipeline(gid, sid) + [{"$skip": skip}, {"$limit": limit}]
@@ -2403,10 +2448,22 @@ class TopMoreView(discord.ui.View):
                 pass
 
 
-@bot.tree.command(name="thong-ke", description="Xem thống kê donate của một kênh YouTube")
-@app_commands.describe(kenh="Kênh cần xem, bỏ trống nếu server chỉ có một kênh")
+@bot.tree.command(name="thong-ke", description="Xem thống kê donate và biểu đồ xu hướng của một kênh YouTube")
+@app_commands.describe(
+    kenh="Kênh cần xem, bỏ trống nếu server chỉ có một kênh",
+    khoang="Khoảng thời gian của biểu đồ",
+)
+@app_commands.choices(khoang=[
+    app_commands.Choice(name="7 ngày", value="7"),
+    app_commands.Choice(name="30 ngày", value="30"),
+    app_commands.Choice(name="90 ngày", value="90"),
+])
 @app_commands.guild_only()
-async def thongke_cmd(inter: discord.Interaction, kenh: str | None = None):
+async def thongke_cmd(
+    inter: discord.Interaction,
+    kenh: str | None = None,
+    khoang: app_commands.Choice[str] = app_commands.Choice(name="7 ngày", value="7"),
+):
     await inter.response.defer(ephemeral=True)
     sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
     if err:
@@ -2419,11 +2476,23 @@ async def thongke_cmd(inter: discord.Interaction, kenh: str | None = None):
         await inter.followup.send(f"Chưa có dữ liệu donate cho kênh **{sname}**.", ephemeral=True)
         return
 
+    days = int(khoang.value)
+    trend, current_total, previous_total = await donation_trend(inter.guild_id, sid, days)
+    values = [amount for _, amount in trend]
+    spark = trend_sparkline(values)
+    if previous_total > 0:
+        change = (current_total - previous_total) / previous_total * 100
+        change_text = f"{'📈' if change >= 0 else '📉'} {change:+.1f}% so với {days} ngày trước"
+    elif current_total > 0:
+        change_text = "📈 Có phát sinh donate; kỳ trước chưa có dữ liệu."
+    else:
+        change_text = "Chưa có biến động trong kỳ."
+
     jewels = int(stats.get("jewels", 0))
     jewel_vnd = int(stats.get("jewel_vnd", 0))
     embed = discord.Embed(
-        title=f"📊 THỐNG KÊ DONATE • {sname}"[:256],
-        description="Tổng hợp toàn bộ dữ liệu donate đã ghi nhận cho kênh này.",
+        title=f"{emoji('CHART')} THỐNG KÊ DONATE • {sname}"[:256],
+        description=f"Tổng hợp dữ liệu đã ghi nhận • Biểu đồ {days} ngày gần nhất (UTC).",
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
     )
@@ -2434,7 +2503,12 @@ async def thongke_cmd(inter: discord.Interaction, kenh: str | None = None):
     embed.add_field(name="Quà Ngọc", value=f"{jewels:,} Jewels", inline=True)
     embed.add_field(name="Ruby quy đổi", value=f"{jewels // 2:,} Ruby", inline=True)
     embed.add_field(name="Giá trị Ngọc ước tính", value=f"{jewel_vnd:,}₫", inline=True)
-    embed.set_footer(text="Số liệu cộng dồn • Giá trị Ruby/Ngọc là ước tính")
+    embed.add_field(
+        name=f"{emoji('CALENDAR')} Xu hướng {days} ngày",
+        value=f"`{spark}`\nTrong kỳ: **{current_total:,}₫**\n{change_text}",
+        inline=False,
+    )
+    embed.set_footer(text="Biểu đồ dùng dữ liệu thực tế • So sánh với kỳ liền trước • Giá trị Ruby/Ngọc là ước tính")
     await inter.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PING)
 
 
