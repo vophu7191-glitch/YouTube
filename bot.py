@@ -2247,7 +2247,12 @@ RANK_PER = 10  # số người mỗi trang ở danh sách đầy đủ
 
 def rank_match(gid: int, sid: str) -> dict:
     if sid == UNASSIGNED:
-        return {"guild_id": gid, "stream_channel": None}
+        return {
+            "$and": [
+                {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]},
+                {"stream_channel": None},
+            ]
+        }
     return {"stream_channel": sid}
 
 
@@ -3092,7 +3097,11 @@ async def gankenh_cmd(inter: discord.Interaction, kenh: str, ma: str | None = No
         await inter.followup.send(err)
         return
     ma = (ma or "").strip()
-    flt = {"guild_id": gid, **({"$or": [{"_id": ma}, {"batch": ma}]} if ma else {"stream_channel": None})}
+    owner_filter = {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]}
+    flt = {"$and": [
+        owner_filter,
+        {"$or": [{"_id": ma}, {"batch": ma}]} if ma else {"stream_channel": None},
+    ]}
     r = await db.donations.update_many(flt, {"$set": {"stream_channel": sc[0]}})
     await inter.followup.send(f"Đã gán {r.modified_count} khoản vào kênh **{sc[1]}**.")
 
