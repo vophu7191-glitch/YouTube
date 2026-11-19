@@ -862,12 +862,14 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
         return None
     try:
         await db.donations.insert_one({
-        "_id": did, "channel_id": cid, "video_id": None, "amount": amount,
-        "currency": cur, "vnd": int(original_vnd) if original_vnd is not None else int(amount * RATES_VND[cur]), "comment": note,
-        "at": original_at or datetime.now(timezone.utc), "video_id": video_id, "manual": True, "added_by": added_by, "batch": batch,
-        "stream_channel": stream_channel, "guild_id": guild_id,
-        "import_source_id": str(source_id)[:200] if source_id else None,
-    })
+            "_id": did, "channel_id": cid, "video_id": video_id, "amount": amount,
+            "currency": cur,
+            "vnd": int(original_vnd) if original_vnd is not None else int(amount * RATES_VND[cur]),
+            "comment": note, "at": original_at or datetime.now(timezone.utc),
+            "manual": True, "added_by": added_by, "batch": batch,
+            "stream_channel": stream_channel, "guild_id": guild_id,
+            "import_source_id": str(source_id)[:200] if source_id else None,
+        })
     except DuplicateKeyError:
         if source_id:
             return None
