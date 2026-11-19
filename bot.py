@@ -831,7 +831,7 @@ def parse_amount(text: str) -> float:
 
 
 async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=None, cache=None,
-                     stream_channel=None, guild_id=None, source_id=None):
+                     stream_channel=None, guild_id=None, source_id=None, original_at=None, original_vnd=None, video_id=None):
     """Thêm một khoản donate cũ. Ném ValueError (kèm lý do) nếu dòng không hợp lệ."""
     if amount <= 0 or cur not in RATES_VND:
         raise ValueError("số tiền hoặc loại tiền không hợp lệ")
@@ -863,8 +863,8 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
     try:
         await db.donations.insert_one({
         "_id": did, "channel_id": cid, "video_id": None, "amount": amount,
-        "currency": cur, "vnd": int(amount * RATES_VND[cur]), "comment": note,
-        "at": datetime.now(timezone.utc), "manual": True, "added_by": added_by, "batch": batch,
+        "currency": cur, "vnd": int(original_vnd) if original_vnd is not None else int(amount * RATES_VND[cur]), "comment": note,
+        "at": original_at or datetime.now(timezone.utc), "video_id": video_id, "manual": True, "added_by": added_by, "batch": batch,
         "stream_channel": stream_channel, "guild_id": guild_id,
         "import_source_id": str(source_id)[:200] if source_id else None,
     })
@@ -3203,12 +3203,34 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
             except ValueError:
                 raise ValueError("discord_id không hợp lệ")
             youtube = data.get("youtube") or data.get("youtube_channel_id") or None
+            if youtube and youtube.startswith("dc:") and not discord_id:
+                try:
+                    discord_id = int(youtube[3:])
+                    youtube = None
+                except ValueError:
+                    raise ValueError("youtube_channel_id dạng dc: không hợp lệ")
             if not youtube and not discord_id:
                 raise ValueError("thiếu cả youtube/youtube_channel_id lẫn discord_id")
             note = data.get("ghi_chu") or data.get("comment") or ""
             source_id = data.get("donation_id") or data.get("id") or ""
             stream_text = data.get("kenh") or data.get("stream_channel_id") or kenh
             sid = await resolve_sc(stream_text)
+            original_at = None
+            if data.get("at"):
+                try:
+                    original_at = datetime.fromisoformat(data["at"].replace("Z", "+00:00"))
+                    if original_at.tzinfo is None:
+                        original_at = original_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    raise ValueError("cột at không phải ngày giờ ISO hợp lệ")
+            original_vnd = None
+            if data.get("vnd"):
+                try:
+                    original_vnd = int(data["vnd"])
+                    if original_vnd < 0:
+                        raise ValueError
+                except ValueError:
+                    raise ValueError("cột vnd phải là số nguyên không âm")
             if youtube:
                 au = cache.get(youtube)
                 if au is None:
@@ -3223,7 +3245,8 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
             prepared.append({
                 "amount": amount, "currency": currency, "discord_id": discord_id,
                 "youtube": youtube, "note": note, "source_id": source_id,
-                "stream_channel": sid,
+                "stream_channel": sid, "original_at": original_at, "original_vnd": original_vnd,
+                "video_id": data.get("video_id") or None,
             })
         except (ValueError, TypeError) as exc:
             errors.append(f"Dòng {n}: {exc}")
@@ -3242,7 +3265,8 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
         did = await add_manual(
             row["youtube"], row["discord_id"], row["amount"], row["currency"],
             row["note"], inter.user.id, batch, cache, row["stream_channel"],
-            inter.guild_id, row["source_id"] or None,
+            inter.guild_id, row["source_id"] or None, row["original_at"],
+            row["original_vnd"], row["video_id"],
         )
         if did is None:
             duplicates += 1
