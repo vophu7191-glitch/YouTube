@@ -45,7 +45,7 @@ def _walk(value: Any):
             yield from _walk(child)
 
 
-def _request(url: str, *, data: dict | None = None, headers: dict | None = None) -> dict | str:
+def _request(url: str, *, data: dict | None = None, headers: dict | None = None, timeout: int = 20) -> dict | str:
     body = json.dumps(data).encode() if data is not None else None
     request_headers = {
         "User-Agent": (
@@ -64,7 +64,7 @@ def _request(url: str, *, data: dict | None = None, headers: dict | None = None)
         request_headers.update(headers)
     request = Request(url, data=body, headers=request_headers)
     try:
-        with urlopen(request, timeout=25) as response:
+        with urlopen(request, timeout=timeout) as response:
             raw = response.read(12 * 1024 * 1024 + 1)
         if len(raw) > 12 * 1024 * 1024:
             raise ReplayError("Phản hồi YouTube vượt giới hạn 12 MiB.")
@@ -92,8 +92,10 @@ def _request(url: str, *, data: dict | None = None, headers: dict | None = None)
 def download_replay(video_id: str, *, max_pages: int = 200) -> tuple[dict, list[dict]]:
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise ReplayError("Video ID không hợp lệ.")
+    max_pages = min(max(int(max_pages), 1), 200)
+    deadline = time.monotonic() + 210
 
-    html = _request(WATCH_URL.format(video_id=video_id))
+    html = _request(WATCH_URL.format(video_id=video_id), timeout=20)
     if not isinstance(html, str):
         raise ReplayError("Không đọc được trang video.")
 
@@ -151,16 +153,20 @@ def download_replay(video_id: str, *, max_pages: int = 200) -> tuple[dict, list[
     for page in range(max_pages):
         if not continuation or continuation in seen:
             break
+        if time.monotonic() >= deadline:
+            raise ReplayError("Đã chạm giới hạn thời gian đọc replay 210 giây; không trả dữ liệu chưa hoàn tất.")
         seen.add(continuation)
         endpoint = f"{REPLAY_ENDPOINT}?{urlencode({'key': api_key})}"
         payload = {"context": context, "continuation": continuation}
-        response = _request(endpoint, data=payload)
+        response = _request(endpoint, data=payload, timeout=max(1, min(20, int(deadline - time.monotonic()))))
         if not isinstance(response, dict):
             raise ReplayError("Phản hồi replay không hợp lệ.")
 
         contents = response.get("continuationContents") or {}
         chat = contents.get("liveChatContinuation") or {}
         actions = chat.get("actions") or []
+        if len(events) + len(actions) > 20000:
+            raise ReplayError("Replay vượt giới hạn 20.000 sự kiện; đã dừng và không trả dữ liệu một phần.")
         for action in actions:
             if isinstance(action, dict):
                 events.append({
