@@ -837,6 +837,9 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
         raise ValueError("số tiền hoặc loại tiền không hợp lệ")
     if not youtube and not discord_id:
         raise ValueError("thiếu cả youtube lẫn discord_id")
+    did = ("csv-" + hashlib.sha256(str(source_id).encode("utf-8")).hexdigest()[:32]) if source_id else f"manual-{uuid.uuid4().hex[:8]}"
+    if source_id and await db.donations.find_one({"_id": did}, {"_id": 1}):
+        return None
 
     if youtube:
         au = cache.get(youtube) if cache is not None else None
@@ -857,9 +860,6 @@ async def add_manual(youtube, discord_id, amount, cur, note, added_by, batch=Non
     else:
         cid = f"dc:{discord_id}"
 
-    did = ("csv-" + hashlib.sha256(str(source_id).encode("utf-8")).hexdigest()[:32]) if source_id else f"manual-{uuid.uuid4().hex[:8]}"
-    if source_id and await db.donations.find_one({"_id": did}, {"_id": 1}):
-        return None
     try:
         await db.donations.insert_one({
             "_id": did, "channel_id": cid, "video_id": video_id, "amount": amount,
