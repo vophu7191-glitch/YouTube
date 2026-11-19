@@ -3320,14 +3320,19 @@ async def xuatdonate_cmd(inter: discord.Interaction):
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(["donation_id", "youtube_channel_id", "video_id", "stream_channel_id", "amount", "currency", "vnd", "comment", "at", "manual", "recovered_from_replay"])
+    def safe_csv_text(value):
+        text = str(value or "").replace("\r", " ").replace("\n", " ")
+        if text.lstrip(" \t").startswith(("=", "+", "-", "@")):
+            return "'" + text
+        return text
     for row in rows:
         at = row.get("at")
         writer.writerow([
-            str(row.get("_id", "")), str(row.get("channel_id", "")),
-            str(row.get("video_id") or ""), str(row.get("stream_channel") or ""),
-            row.get("amount", ""), row.get("currency", ""), row.get("vnd", ""),
-            str(row.get("comment") or "").replace("\\r", " ").replace("\\n", " "),
-            at.isoformat() if hasattr(at, "isoformat") else str(at or ""),
+            safe_csv_text(row.get("_id", "")), safe_csv_text(row.get("channel_id", "")),
+            safe_csv_text(row.get("video_id") or ""), safe_csv_text(row.get("stream_channel") or ""),
+            row.get("amount", ""), safe_csv_text(row.get("currency", "")), row.get("vnd", ""),
+            safe_csv_text(row.get("comment") or ""),
+            safe_csv_text(at.isoformat() if hasattr(at, "isoformat") else str(at or "")),
             bool(row.get("manual")), bool(row.get("recovered_from_replay")),
         ])
     payload = io.BytesIO(output.getvalue().encode("utf-8-sig"))
