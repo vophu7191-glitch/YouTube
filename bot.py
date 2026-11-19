@@ -80,6 +80,22 @@ JEWEL_RATE_VND = float(os.getenv("JEWEL_RATE_VND") or RATES_VND.get("USD", 25400
 RATES_VND["JEWEL"] = JEWEL_RATE_VND  # loại tiền ảo "JEWEL" = Ngọc
 CODE_RE = re.compile(r"DC-[A-Z0-9]{6}")
 db = AsyncIOMotorClient(MONGO_URI, tz_aware=True)[os.getenv("DB_NAME", "superchat")]
+
+
+async def log_admin_action(inter: discord.Interaction, action: str, target: str = "", details: dict | None = None):
+    if not inter.guild_id:
+        return
+    try:
+        await db.admin_audit.insert_one({
+            "guild_id": inter.guild_id,
+            "actor_id": inter.user.id,
+            "action": action[:80],
+            "target": target[:160],
+            "details": details or {},
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        log.exception("Không ghi được nhật ký quản trị cho server %s", inter.guild_id)
 session: aiohttp.ClientSession | None = None
 watchers: dict[str, asyncio.Task] = {}  # video_id -> tác vụ đọc live chat (mỗi video chỉ đọc 1 lần)
 subs: dict[str, set[int]] = {}  # video_id -> các server Discord đang theo dõi video đó
@@ -2982,6 +2998,7 @@ async def themdonate_cmd(
         "at": datetime.now(timezone.utc), "manual": True, "added_by": inter.user.id,
         "stream_channel": sc[0], "guild_id": inter.guild_id,
     })
+    await log_admin_action(inter, "add_donation", did, {"stream_channel": sc[0], "currency": cur, "amount": so_tien})
     await inter.followup.send(
         f"Đã thêm {so_tien:,.0f} {cur} (~{vnd:,}₫) vào kênh **{sc[1]}**. "
         f"Mã: `{did}` (nhập sai thì dùng `/xóa-donate`)."
@@ -3002,6 +3019,8 @@ async def xoadonate_cmd(inter: discord.Interaction, ma: str):
     else:
         flt = {"$and": [owner_filter, {"$or": [{"_id": ma}, {"batch": ma}]}]}
     r = await db.donations.delete_many(flt)
+    if r.deleted_count:
+        await log_admin_action(inter, "delete_donation", ma, {"deleted_count": r.deleted_count})
     msg = f"Đã xoá {r.deleted_count} khoản." if r.deleted_count else "Không tìm thấy khoản donate với mã này."
     await inter.response.send_message(msg, ephemeral=True)
 
@@ -3093,7 +3112,42 @@ async def nhapdonate_cmd(inter: discord.Interaction, file: discord.Attachment, k
         msg += "\nLỗi:\n" + "\n".join(errors[:10])
         if len(errors) > 10:
             msg += f"\n... và {len(errors) - 10} lỗi khác."
+    if ok:
+        await log_admin_action(inter, "import_donations_csv", batch, {"imported": ok, "rows": len(rows), "errors": len(errors)})
     await inter.followup.send(msg[:1990])
+
+
+
+@bot.tree.command(name="xuat-donate", description="Xuất dữ liệu donate của server thành CSV (admin)")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def xuatdonate_cmd(inter: discord.Interaction):
+    await inter.response.defer(ephemeral=True, thinking=True)
+    owner_filter = {"$or": [{"guild_id": inter.guild_id}, {"origin_guild_ids": inter.guild_id}]}
+    rows = await db.donations.find(owner_filter).sort("at", -1).limit(5001).to_list(5001)
+    if not rows:
+        await inter.followup.send("Server chưa có dữ liệu donate để xuất.", ephemeral=True)
+        return
+    truncated = len(rows) > 5000
+    rows = rows[:5000]
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["donation_id", "youtube_channel_id", "video_id", "stream_channel_id", "amount", "currency", "vnd", "comment", "at", "manual", "recovered_from_replay"])
+    for row in rows:
+        at = row.get("at")
+        writer.writerow([
+            str(row.get("_id", "")), str(row.get("channel_id", "")),
+            str(row.get("video_id") or ""), str(row.get("stream_channel") or ""),
+            row.get("amount", ""), row.get("currency", ""), row.get("vnd", ""),
+            str(row.get("comment") or "").replace("\\r", " ").replace("\\n", " "),
+            at.isoformat() if hasattr(at, "isoformat") else str(at or ""),
+            bool(row.get("manual")), bool(row.get("recovered_from_replay")),
+        ])
+    payload = io.BytesIO(output.getvalue().encode("utf-8-sig"))
+    filename = f"jion-donate-{inter.guild_id}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.csv"
+    await log_admin_action(inter, "export_donations_csv", filename, {"exported": len(rows), "truncated": truncated})
+    note = f"Đã xuất {len(rows):,} khoản donate." + (" Chỉ lấy 5.000 khoản mới nhất; file chưa bao gồm phần cũ hơn." if truncated else "")
+    await inter.followup.send(note, file=discord.File(payload, filename=filename), ephemeral=True)
 
 
 @bot.tree.command(name="set-kênh-thông-báo", description="Chọn kênh Discord nhận thông báo live và video mới (admin)")
@@ -3107,6 +3161,7 @@ async def kenhthongbao_cmd(inter: discord.Interaction, kenh: discord.TextChannel
         return
     await inter.response.defer(ephemeral=True)
     await db.guilds.update_one({"_id": inter.guild_id}, {"$set": {"announce": kenh.id}}, upsert=True)
+    await log_admin_action(inter, "set_announce_channel", str(kenh.id))
     await inter.followup.send(f"Đã đặt kênh nhận thông báo live/video mới: {kenh.mention}")
 
 
@@ -3129,6 +3184,7 @@ async def kenhthongbaodonate_cmd(inter: discord.Interaction, kenh: discord.TextC
     await db.guilds.update_one(
         {"_id": inter.guild_id}, {"$set": {"donation_announce": kenh.id}}, upsert=True
     )
+    await log_admin_action(inter, "set_donation_announce_channel", str(kenh.id))
     await inter.response.send_message(
         f"Đã đặt {kenh.mention} làm kênh chỉ nhận thông báo donate.", ephemeral=True
     )
@@ -3155,6 +3211,8 @@ async def gankenh_cmd(inter: discord.Interaction, kenh: str, ma: str | None = No
         {"$or": [{"_id": ma}, {"batch": ma}]} if ma else {"stream_channel": None},
     ]}
     r = await db.donations.update_many(flt, {"$set": {"stream_channel": sc[0]}})
+    if r.modified_count:
+        await log_admin_action(inter, "assign_donation_channel", ma or "unassigned", {"stream_channel": sc[0], "modified_count": r.modified_count})
     await inter.followup.send(f"Đã gán {r.modified_count} khoản vào kênh **{sc[1]}**.")
 
 
@@ -3174,6 +3232,7 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
         return
     await db.streamers.update_one({"_id": au["channelId"]}, {"$set": {"name": au["displayName"]}}, upsert=True)
     await db.guilds.update_one({"_id": inter.guild_id}, {"$addToSet": {"yt": au["channelId"]}}, upsert=True)
+    await log_admin_action(inter, "follow_youtube_channel", au["channelId"])
     recent = await fetch_channel_videos(au["channelId"])
     if recent:
         await db.feed_state.update_one(
@@ -3215,6 +3274,8 @@ async def theodoikenh_cmd(inter: discord.Interaction, kenh: str):
 @app_commands.guild_only()
 async def huytheodoi_cmd(inter: discord.Interaction, kenh: str):
     r = await db.guilds.update_one({"_id": inter.guild_id}, {"$pull": {"yt": kenh.strip()}})
+    if r.modified_count:
+        await log_admin_action(inter, "unfollow_youtube_channel", kenh.strip())
     msg = ("Đã ngừng tự theo dõi kênh này (donate đã ghi vẫn được giữ)."
            if r.modified_count else "Server này chưa tự theo dõi kênh đó.")
     await inter.response.send_message(msg, ephemeral=True)
