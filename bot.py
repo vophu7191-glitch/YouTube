@@ -2282,6 +2282,23 @@ async def rank_summary(gid: int, sid: str) -> tuple[int, int]:
     return (rows[0]["donors"], rows[0]["sum"]) if rows else (0, 0)
 
 
+async def donation_stats(gid: int, sid: str) -> dict | None:
+    rows = await db.donations.aggregate(
+        rank_pipeline(gid, sid) + [{
+            "$group": {
+                "_id": None,
+                "donors": {"$sum": 1},
+                "donations": {"$sum": "$count"},
+                "money": {"$sum": "$money"},
+                "jewels": {"$sum": "$jewels"},
+                "jewel_vnd": {"$sum": "$jewel_vnd"},
+                "total": {"$sum": "$total"},
+            }
+        }]
+    ).to_list(1)
+    return rows[0] if rows else None
+
+
 async def rank_page(gid: int, sid: str, skip: int, limit: int) -> list[dict]:
     return await db.donations.aggregate(
         rank_pipeline(gid, sid) + [{"$skip": skip}, {"$limit": limit}]
@@ -2368,6 +2385,41 @@ class TopMoreView(discord.ui.View):
                 await self.message.edit(view=None)
             except discord.HTTPException:
                 pass
+
+
+@bot.tree.command(name="thong-ke", description="Xem thống kê donate của một kênh YouTube")
+@app_commands.describe(kenh="Kênh cần xem, bỏ trống nếu server chỉ có một kênh")
+@app_commands.guild_only()
+async def thongke_cmd(inter: discord.Interaction, kenh: str | None = None):
+    await inter.response.defer(ephemeral=True)
+    sc, err = await pick_streamer(inter.guild_id, kenh, for_view=True)
+    if err:
+        await inter.followup.send(err, ephemeral=True)
+        return
+
+    sid, sname = sc
+    stats = await donation_stats(inter.guild_id, sid)
+    if not stats:
+        await inter.followup.send(f"Chưa có dữ liệu donate cho kênh **{sname}**.", ephemeral=True)
+        return
+
+    jewels = int(stats.get("jewels", 0))
+    jewel_vnd = int(stats.get("jewel_vnd", 0))
+    embed = discord.Embed(
+        title=f"📊 THỐNG KÊ DONATE • {sname}"[:256],
+        description="Tổng hợp toàn bộ dữ liệu donate đã ghi nhận cho kênh này.",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Tổng giá trị ước tính", value=f"**{int(stats.get('total', 0)):,}₫**", inline=False)
+    embed.add_field(name="Người donate", value=f"{int(stats.get('donors', 0)):,}", inline=True)
+    embed.add_field(name="Lượt donate", value=f"{int(stats.get('donations', 0)):,}", inline=True)
+    embed.add_field(name="Tiền donate", value=f"{int(stats.get('money', 0)):,}₫", inline=True)
+    embed.add_field(name="Quà Ngọc", value=f"{jewels:,} Jewels", inline=True)
+    embed.add_field(name="Ruby quy đổi", value=f"{jewels // 2:,} Ruby", inline=True)
+    embed.add_field(name="Giá trị Ngọc ước tính", value=f"{jewel_vnd:,}₫", inline=True)
+    embed.set_footer(text="Số liệu cộng dồn • Giá trị Ruby/Ngọc là ước tính")
+    await inter.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PING)
 
 
 @bot.tree.command(name="bảng-xếp-hạng", description="Xem danh sách xếp hạng donate đầy đủ, gồm cả người ngoài top 10")
@@ -3182,6 +3234,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
 
 
 @recover_live_cmd.autocomplete("kenh")
+@thongke_cmd.autocomplete("kenh")
 @top_cmd.autocomplete("kenh")
 @bangxephang_cmd.autocomplete("kenh")
 @themdonate_cmd.autocomplete("kenh")
@@ -3189,7 +3242,7 @@ async def followed_autocomplete(inter: discord.Interaction, current: str):
 @gankenh_cmd.autocomplete("kenh")
 async def streamer_autocomplete(inter: discord.Interaction, current: str):
     items = await list_streamers(inter.guild_id)
-    if not inter.command or inter.command.name != "top-donate":  # chỉ /top-donate được xem mục "Chưa phân kênh"
+    if not inter.command or inter.command.name not in {"top-donate", "thong-ke"}:  # chỉ lệnh xem thống kê/bảng donate được chọn mục chưa phân kênh
         items = [x for x in items if x[0] != UNASSIGNED]
     cur = current.strip().lower()
     return [
