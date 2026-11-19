@@ -2342,7 +2342,7 @@ async def donation_trend(gid: int, sid: str, days: int) -> tuple[list[tuple[str,
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await db.donations.aggregate(pipeline).to_list(days)
+    rows = await db.donations.aggregate(pipeline).to_list(days + 1)
     previous = await db.donations.aggregate([
         {"$match": previous_match},
         {"$group": {"_id": None, "total": {"$sum": "$vnd"}}},
