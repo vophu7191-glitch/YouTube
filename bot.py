@@ -848,7 +848,10 @@ async def list_streamers(gid: int) -> list[tuple[str, str]]:
     """Danh sách (id kênh, tên) các kênh YouTube của server gid: kênh đã có donate trong server,
     kênh server tự theo dõi, và kênh server đang theo dõi live.
     Thêm mục 'Chưa phân kênh' nếu server còn khoản donate chưa gắn kênh."""
-    ids = set(i for i in await db.donations.distinct("stream_channel", {"guild_id": gid}) if i)
+    ids = set(i for i in await db.donations.distinct(
+        "stream_channel",
+        {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]},
+    ) if i)
     ids |= set((await guild_cfg(gid)).get("yt", []))
     for vid, gs in subs.items():
         if gid in gs and vinfo.get(vid, {}).get("channel_id"):
@@ -857,7 +860,12 @@ async def list_streamers(gid: int) -> list[tuple[str, str]]:
     async for d in db.streamers.find({"_id": {"$in": list(ids)}}):
         names[d["_id"]] = d.get("name") or d["_id"]
     out = sorted(((i, names.get(i) or i) for i in ids), key=lambda x: x[1].lower())
-    if await db.donations.find_one({"guild_id": gid, "stream_channel": None}, {"_id": 1}):
+    if await db.donations.find_one({
+        "$and": [
+            {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]},
+            {"stream_channel": None},
+        ]
+    }, {"_id": 1}):
         out.append((UNASSIGNED, "Chưa phân kênh"))
     return out
 
@@ -980,6 +988,11 @@ async def migrate_global_donations():
             new_id = f"live:{video_id}:{event_id}"
 
         if old_id == new_id:
+            if guild_id is not None:
+                await db.donations.update_one(
+                    {"_id": old_id},
+                    {"$addToSet": {"origin_guild_ids": guild_id}},
+                )
             continue
 
         origin_ids = list(doc.get("origin_guild_ids") or [])
@@ -999,7 +1012,7 @@ async def migrate_global_donations():
             merged_announcements = dict(existing.get("announcements") or {})
             merged_announcements.update(announcements)
             merged_announced = set(existing.get("announced_guilds") or [])
-            merged_announced.update(origin_ids)
+            merged_announced.update(int(gid) for gid in merged_announcements)
             updates = {
                 "origin_guild_ids": list(merged_origins),
                 "announcements": merged_announcements,
@@ -1017,7 +1030,7 @@ async def migrate_global_donations():
         doc["_id"] = new_id
         doc["origin_guild_ids"] = origin_ids
         doc["announcements"] = announcements
-        doc["announced_guilds"] = origin_ids
+        doc["announced_guilds"] = [int(gid) for gid in announcements]
         doc.pop("announce_channel_id", None)
         doc.pop("announce_message_id", None)
         await db.donations.insert_one(doc)
@@ -2234,7 +2247,12 @@ RANK_PER = 10  # số người mỗi trang ở danh sách đầy đủ
 
 def rank_match(gid: int, sid: str) -> dict:
     if sid == UNASSIGNED:
-        return {"guild_id": gid, "stream_channel": None}
+        return {
+            "$and": [
+                {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]},
+                {"stream_channel": None},
+            ]
+        }
     return {"stream_channel": sid}
 
 
@@ -3079,7 +3097,11 @@ async def gankenh_cmd(inter: discord.Interaction, kenh: str, ma: str | None = No
         await inter.followup.send(err)
         return
     ma = (ma or "").strip()
-    flt = {"guild_id": gid, **({"$or": [{"_id": ma}, {"batch": ma}]} if ma else {"stream_channel": None})}
+    owner_filter = {"$or": [{"guild_id": gid}, {"origin_guild_ids": gid}]}
+    flt = {"$and": [
+        owner_filter,
+        {"$or": [{"_id": ma}, {"batch": ma}]} if ma else {"stream_channel": None},
+    ]}
     r = await db.donations.update_many(flt, {"$set": {"stream_channel": sc[0]}})
     await inter.followup.send(f"Đã gán {r.modified_count} khoản vào kênh **{sc[1]}**.")
 
